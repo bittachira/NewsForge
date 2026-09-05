@@ -1,0 +1,6 @@
+# Normalize line endings to LF across the repo regardless of platform autocrlf settings.
+# This keeps edit/replace operations predictable on Windows/macOS/Linux.
+* text eol=lf
+*.py text eol=lf
+*.toml text eol=lf
+*.md text eol=lf

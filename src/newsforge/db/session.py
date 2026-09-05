@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -25,19 +26,33 @@ def build_engine(config: DatabaseConfig | None = None) -> create_engine:
     """
     config = config or DatabaseConfig()
 
-    if isinstance(config.path, str) and (config.path.startswith("postgresql") or config.path.startswith("postgres")):
-        url = config.path
-        engine = create_engine(url, echo=config.echo_sql, future=True)
-        return engine
+    # Non-SQLite DSNs (PostgreSQL, MySQL, ...) are passed through verbatim.
+    if isinstance(config.path, str) and config.path.startswith(
+        ("postgresql", "postgres", "mysql", "mariadb")
+    ):
+        return create_engine(config.path, echo=config.echo_sql, future=True)
 
     path = Path(config.path)
-    if path.parent and not path.exists() and path.parent != Path("."):
-        path.parent.mkdir(parents=True, exist_ok=True)
+    abs_path = Path(os.path.abspath(path))  # canonical absolute OS path (drive-safe on Windows)
+    if not abs_path.is_absolute() and str(abs_path.parent) != ".":
+        abs_path.parent.mkdir(parents=True, exist_ok=True)
 
-    url = f"sqlite:///{path}"
-    logger.info("Opening database at %s", path)
-    engine = create_engine(url, echo=config.echo_sql, future=True, connect_args={"check_same_thread": False})
-    return engine
+    logger.info("Opening database at %s", abs_path)
+    kwargs = {"future": True, "connect_args": {"check_same_thread": False}}
+
+    # On Windows the sqlite:// URL scheme cannot open absolute paths that carry a
+    # drive letter (create_all and later queries would target different files).
+    # Resolve same-drive absolute paths to cwd-relative ones, which SQLAlchemy
+    # opens reliably. Relative inputs are used as-is.
+    if sys.platform == "win32" and abs_path.is_absolute() \
+            and abs_path.drive == Path.cwd().drive:
+        rel = Path(os.path.relpath(abs_path, Path.cwd())).as_posix()  # forward slashes for the URL
+        return create_engine(f"sqlite:///{rel}", **kwargs)
+
+    # POSIX (absolute paths work with 3 slashes) or cross-drive Windows fallback.
+    posix = abs_path.replace(os.sep, "/")
+    url = f"sqlite:////{posix}" if abs_path.is_absolute() else f"sqlite:///{posix}"
+    return create_engine(url, **kwargs)
 
 
 # Shared default engine + factory. Tests override these with isolated databases.
@@ -62,6 +77,41 @@ def set_session_factory(factory: sessionmaker) -> None:
     global _default_factory, _default_engine
     _default_factory = factory
     _default_engine = None  # force a fresh engine bound to the new factory
+
+
+def use_isolated_database(path) -> None:
+    """Point the shared (engine, factory) at an isolated DB. Used by tests."""
+    global _default_engine, _default_factory
+    # Release connections/locks of the previous engine so its file can be removed.
+    if _default_engine is not None:
+        _default_engine.dispose()
+    _default_engine = build_engine(DatabaseConfig(path=path))
+    Base.metadata.create_all(bind=_default_engine)
+    _default_factory = sessionmaker(
+        bind=_default_engine, autocommit=False, autoflush=True, expire_on_commit=False
+    )
+
+
+def switch_default_database(path) -> None:
+    """Point the shared DB at ``path`` (tests). Does NOT restore — caller manages that."""
+    global _default_engine, _default_factory
+    use_isolated_database(path)
+
+
+@contextmanager
+def use_isolated_database_ctx(path):
+    """Context manager: isolate the shared DB at ``path`` and restore on exit (tests)."""
+    global _default_engine, _default_factory
+    prev_engine, prev_factory = _default_engine, _default_factory
+    try:
+        use_isolated_database(path)
+        yield
+    finally:
+        # Release the current engine's connections/locks before restoring so its
+        # file can be removed on Windows.
+        if _default_engine is not None:
+            _default_engine.dispose()
+        _default_engine, _default_factory = prev_engine, prev_factory
 
 
 def get_session_factory() -> sessionmaker:

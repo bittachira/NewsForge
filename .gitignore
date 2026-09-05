@@ -25,6 +25,7 @@ logs/
 .coverage
 htmlcov/
 .pytest_cache/
+.pytest_tmp/
 .ruff_cache/
 
 # OS / editor
