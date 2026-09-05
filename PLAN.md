@@ -2,7 +2,7 @@
 
 > AI-native media & information company. Discover → Verify → Transform → Distribute trusted information across channels, build an owned audience and monetize it through many sources. Independent, original, not a content farm.
 
-**Status:** v0.2 — Source Engine (**P1**) complete; building Story Engine (**P2**).
+**Status:** v0.3 — Source Engine (**P1**) and Story Engine (**P2**) complete; starting Trust + Quality Gate (**P3**).
 **Date:** 2026-09-05 · **Owner:** autonomous engineering team (CTO-led).
 
 ### Progress log
@@ -10,8 +10,23 @@
 |-------|-------|----------------------|
 | P0 — scaffold, config, core, 27-table schema | ✅ committed `44a64e2` | `import newsforge` OK; all 27 tables created; JSON round-trip + relationships verified. |
 | P1 — Source Engine (ingest/parse/dedupe/trust) | ✅ committed `99781a3` | Live ingest of BBC News RSS → **30 items** normalized, dedupe confirmed on re-ingest (`added:0 skipped:30`), trust tiers assigned. **8/8 pytest gate tests pass**, deterministically across repeated runs (no leftover artifacts). |
-| P2 — Story Engine (detect persistent stories) | 🚧 in progress | One source item → one `STORY_ID`; items linked; story-level trust + status. |
+| P2 — Story Engine (detect persistent stories) | ✅ committed (this session) | 10/10 gate tests pass deterministically (3× repeated runs); unrelated signals never merge; idempotent upsert+link verified; story trust aggregates from source tiers. See commit below. Claim engine deferred to P3. |
 | P3–P6, MVP DONE | ⬜ roadmap (§4/§6) | See phase table below. |
+
+### P2 — Story Engine: decisions & post-mortem of the untested detector
+
+The handoff flagged `stories/detector.py` as **written but not yet tested**. I verified it before building on top, found two real bugs, and fixed them rather than shipping broken clustering:
+
+1. **`classify_topic` mislabeled unrelated text.** With `best_score = -1`, the first taxonomy entry won even with 0 keyword hits, so "Otra historia totalmente distinta" was tagged `package_tax`. Fixed: non-matching text now returns `("", 0.0)`; multi-word keywords match on any constituent word (better ES/EN recall).
+2. **`cluster_items` merged unrelated items.** It computed the entity prefix *per current item* and forced every item through a topic name, so unrelated signals collapsed into one story. Fixed: two-pass clustering — group by `(topic, year)`, then resolve a shared entity prefix only when it genuinely appears in ≥2 distinct items.
+
+**Added `db/story_signals`** (many-to-many join linking source items → their persistent story; unique constraint keeps re-detection idempotent). Registered the new table in `newsforge.db.__init__`.
+
+**Reliability fix.** The first engine pass opened/closed many short-lived sessions per operation. On this Windows+SQLite/QueuePool setup that made commits unreliable (data created but not persisted across sessions) and was flaky across runs. Consolidated to **one session per `process()` call**. Verified deterministic over 3× repeated runs.
+
+**Trust aggregation (§9 MVP proxy).** Story trust = mean of contributing items' source *tier baselines* (TIER_1→95 … TIER_4→35). Deterministic and testable; freshness/consensus/primary-source weighting layered on in P3 without changing this API.
+
+**Deferred (per handoff decision):** LLM-based CLUSTER step (§4) — kept the deterministic heuristic so P2 is testable offline; an LLM swap later changes only `classify_topic` and callers keep working. Claim engine, quality gate, AI editor follow in P3–P4.
 
 ---
 
@@ -152,7 +167,7 @@ Story dashboards v2, multi-language (ES/EN/PT → FR/DE/IT), video scripts, prem
 |-------|-------------|--------------------------------------------|
 | P0 | Config + DB schema + core logger/security | `python -c "import newsforge"`; DB tables created; unit tests green. |
 | P1 | Source Engine + ingest demo | Ingest a real RSS feed → N normalized items, dedupe works, trust tiers assigned. |
-| P2 | Story + Claim engines | One source item → one STORY_ID with ≥1 CLAIM and provenance. |
+| P2 | **Story Engine (done)** — detect persistent stories, link items, story-level trust | One source item → one stable `STORY_ID`; related signals cluster; idempotent upsert+link verified; story trust aggregates from source tiers. Claim engine moved into P3. |
 | P3 | Trust + Quality Gate + Decision | A low-trust/contradicted input is **REJECT/WAIT**, not auto-published. |
 | P4 | AI Router (MOCK) + Editor | Pipeline produces an original article from claims; no fabricated facts; cost recorded. |
 | P5 | SEO + CMS/Publish | Published page has JSON-LD, canonical, OG tags, in sitemap + RSS; `/articles` renders. |

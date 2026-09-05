@@ -206,8 +206,31 @@ class source_items(Base):
     raw_json: Mapped[str | None] = json_col()
 
 
+# --------------------------------------------------------------------------- #
+# Story Engine (§4) — link detected source items to their persistent story
+# --------------------------------------------------------------------------- #
+class story_signals(Base):
+    """Many-to-many join linking a detected *story* (§4) to its source items (§6).
+
+    One row per ``(story_id, item_id)`` pair. This is the canonical link that lets the
+    Story Engine update an existing story when a related signal arrives, and lets
+    analytics count how many signals feed each story. The unique constraint keeps
+    re-detection idempotent.
+    """
+    __tablename__ = "story_signals"
+
+    id: Mapped[str] = uuid_pk()
+    story_id: Mapped[str] = mapped_column(String(128), ForeignKey("stories.id"), index=True, nullable=False)
+    item_id: Mapped[str] = mapped_column(String(36), ForeignKey("source_items.id"), index=True, nullable=False)
+    created_at: Mapped[str] = ts_col()
+
+    story: Mapped["stories"] = relationship(back_populates="signals", lazy="select")
+    source_item: Mapped[source_items] = relationship(lazy="selectin")
+
+
 class stories(Base):
     __tablename__ = "stories"
+
 
     id: Mapped[str] = uuid_pk()
     story_id: Mapped[str] = mapped_column(String(128), default=lambda: str(uuid.uuid4()), unique=True, index=True, nullable=False)
@@ -222,6 +245,8 @@ class stories(Base):
 
     articles: Mapped[list["articles"]] = relationship(
         back_populates="story", cascade="all, delete-orphan")
+
+    signals: Mapped[list["story_signals"]] = relationship(back_populates="story", lazy="select")
 
 
 class articles(Base):
