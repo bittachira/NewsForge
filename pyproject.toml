@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "newsforge"
+version = "0.1.0"
+description = "AI-native media & information company: discover, verify, transform and distribute trusted information."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115,<1.0",
+    "uvicorn[standard]>=0.32,<1.0",
+    "pydantic>=2.8,<3.0",
+    "sqlalchemy>=2.0,<3.0",
+    "python-dotenv>=1.0.0",
+    "jinja2>=3.1,<4.0",
+    "aiohttp>=3.9,<4.0",
+    "beautifulsoup4>=4.12,<5.0",
+    "lxml>=5.2,<6.0",
+    "duckduckgo-search>=7.4,<8.0",
+    "geoip2>=5.0,<6.0",
+    "cryptography>=42.0,<53.0",
+    "httpx>=0.27,<1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

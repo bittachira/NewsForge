@@ -1,0 +1,14 @@
+# NewsForge — AI-native media & information company
+# Runtime dependencies for the MVP + core platform.
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.32,<1.0
+pydantic>=2.8,<3.0
+sqlalchemy>=2.0,<3.0
+python-dotenv>=1.0.0
+jinja2>=3.1,<4.0
+aiohttp>=3.9,<4.0
+beautifulsoup4>=4.12,<5.0
+duckduckgo-search>=7.4,<8.0
+geoip2>=5.0,<6.0
+cryptography>=42.0,<53.0
+httpx>=0.27,<1.0
