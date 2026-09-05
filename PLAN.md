@@ -2,8 +2,16 @@
 
 > AI-native media & information company. Discover → Verify → Transform → Distribute trusted information across channels, build an owned audience and monetize it through many sources. Independent, original, not a content farm.
 
-**Status:** v0.1 — planning + MVP foundation.
+**Status:** v0.2 — Source Engine (**P1**) complete; building Story Engine (**P2**).
 **Date:** 2026-09-05 · **Owner:** autonomous engineering team (CTO-led).
+
+### Progress log
+| Phase | State | Verification evidence |
+|-------|-------|----------------------|
+| P0 — scaffold, config, core, 27-table schema | ✅ committed `44a64e2` | `import newsforge` OK; all 27 tables created; JSON round-trip + relationships verified. |
+| P1 — Source Engine (ingest/parse/dedupe/trust) | ✅ committed `99781a3` | Live ingest of BBC News RSS → **30 items** normalized, dedupe confirmed on re-ingest (`added:0 skipped:30`), trust tiers assigned. **8/8 pytest gate tests pass**, deterministically across repeated runs (no leftover artifacts). |
+| P2 — Story Engine (detect persistent stories) | 🚧 in progress | One source item → one `STORY_ID`; items linked; story-level trust + status. |
+| P3–P6, MVP DONE | ⬜ roadmap (§4/§6) | See phase table below. |
 
 ---
 
