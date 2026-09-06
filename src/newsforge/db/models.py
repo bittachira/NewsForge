@@ -353,6 +353,12 @@ class trust_evaluations(Base):
     policy_version: Mapped[str] = mapped_column(String(32), default="p3.v1", nullable=False)
     computed_at: Mapped[str] = ts_col()
 
+    # Idempotency (§17): one evaluation per (target_type, target_id). Re-inserting the
+    # same logical evaluation raises IntegrityError and is treated as a no-op by callers.
+    __table_args__ = (
+        UniqueConstraint("target_type", "target_id", name="uq_trust_evaluations_target"),
+    )
+
 
 class quality_evaluations(Base):
     """QUALITY GATE result for a STORY or CLAIM (§9).
@@ -370,6 +376,12 @@ class quality_evaluations(Base):
     reasons_json: Mapped[str | None] = json_col()
     policy_version: Mapped[str] = mapped_column(String(32), default="p3.v1", nullable=False)
     computed_at: Mapped[str] = ts_col()
+
+    # Idempotency (§17): one evaluation per (target_type, target_id). Re-inserting the
+    # same logical evaluation raises IntegrityError and is treated as a no-op by callers.
+    __table_args__ = (
+        UniqueConstraint("target_type", "target_id", name="uq_quality_evaluations_target"),
+    )
 
 
 class decisions(Base):
@@ -657,6 +669,9 @@ class audit_logs(Base):
     entity_id: Mapped[str | None] = mapped_column(String(36), index=True)
     before_json: Mapped[str | None] = json_col()
     after_json: Mapped[str | None] = json_col()
+    # Which rule version produced this audit record (§18). Lets an auditor trace a decision back to
+    # the exact policy that ran, without duplicating the evaluation rows.
+    policy_version: Mapped[str | None] = mapped_column(String(32), default="p3.v1", nullable=False)
     created_at: Mapped[str] = ts_col()
 
 

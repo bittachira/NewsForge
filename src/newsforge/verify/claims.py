@@ -12,6 +12,10 @@ same verification state, confidence and provenance. No randomness, no "now" leak
 """
 from __future__ import annotations
 
+import hashlib
+
+import uuid
+
 import uuid
 
 from newsforge.db.models import ClaimStatus
@@ -22,12 +26,24 @@ def build_claim(
     text: str | None,
     story_id: str | None = None,
     source_item_id: str | None = None,
+    claim_id: str | None = None,
     source_url: str | None = None,
     publication_date: str | None = None,
 ) -> dict:
-    """Build a claim record. Status starts UNVERIFIED with zero confidence (§1)."""
+    """Build a claim record. Status starts UNVERIFIED with zero confidence (§1).
+
+    ``claim_id`` is optional; when omitted a fresh UUID is generated (each call is a distinct
+    entity). When supplied it is used verbatim, which lets callers make persistence idempotent:
+    re-running the same evaluation yields the same key and the UNIQUE constraint rejects the
+    duplicate (§15, §26 Case 10).
+    """
     return {
-        "claim_id": str(uuid.uuid4()),
+        # H1 determinism: when the caller does not supply a claim_id we derive a STABLE identity from
+        # the claim's provenance + normalized text (story_id + text) instead of a random UUID. Two
+        # calls describing the same logical claim therefore yield the SAME id, which lets persistence
+        # dedupe them through UNIQUE(claim_id) (idempotency, §15 / §26 Case 10). Genuinely different
+        # claims differ in story or text and never collide. No randomness, no timestamp (§15).
+        "claim_id": claim_id or _canonical_identity((text or "").strip(), story_id),
         "story_id": story_id,
         "source_item_id": source_item_id,
         "text": (text or "").strip(),
@@ -37,6 +53,19 @@ def build_claim(
         "confidence": 0,
         "status": ClaimStatus.UNVERIFIED.value,
     }
+
+
+def _canonical_identity(text: str, story_id: str | None) -> str:
+    """Deterministic identity key for a claim (H1).
+
+    Identity = SHA-256 of ``story_id + "\x00" + normalized_text``. It is stable by construction: no
+    random UUID, no timestamp, no unstable data. Including ``story_id`` guarantees the same text is
+    never confused across stories; when a story is absent we fall back to text alone. This gives a
+    reproducible key that both dedupes identical claims and keeps distinct claims separate.
+    """
+    normalized = (text or "").strip()
+    key = f"{(story_id or '').strip()}\x00{normalized}"
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
 
 def normalize_claim_ids(claim: dict) -> tuple[str | None, str | None]:

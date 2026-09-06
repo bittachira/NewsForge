@@ -31,11 +31,26 @@ def test_normalize_claim_ids_returns_provenance_pair():
     assert story == "story-1" and item == "item-9"
 
 
-def test_build_claim_strips_whitespace_and_generates_uuid():
+def test_build_claim_strips_whitespace_and_is_deterministic():
+    """Whitespace is stripped; the same logical claim yields the SAME id (H1 determinism)."""
     claim = build_claim(text="  padded text  ")
     assert claim["text"] == "padded text"
-    # A fresh uuid each call (section 1: every claim is a distinct entity).
-    assert build_claim(text="same")["claim_id"] != build_claim(text="same")["claim_id"]
+    # Deterministic identity: two calls of the same logical claim share an id, so persistence can
+    # dedupe them via UNIQUE(claim_id) (idempotency, §15 / §26 Case 10). No random UUID per call.
+    assert build_claim(text="same", story_id="s1")["claim_id"] == build_claim(
+        text="same", story_id="s1"
+    )["claim_id"]
+
+
+def test_build_claim_distinct_claims_do_not_collide():
+    """Two logically different claims must never share an id (H1: no false dedup)."""
+    assert build_claim(text="same", story_id="s1")["claim_id"] != build_claim(
+        text="other", story_id="s1"
+    )["claim_id"]
+    # Same text in a different story is a different claim.
+    assert build_claim(text="same", story_id="s1")["claim_id"] != build_claim(
+        text="same", story_id="s2"
+    )["claim_id"]
 
 
 def test_provenance_chain_reconstructs_full_path():

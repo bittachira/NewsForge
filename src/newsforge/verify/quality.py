@@ -32,10 +32,12 @@ def _split_sentences(text: str) -> list[str]:
 def _claim_bundle(c):
     """Normalize a claim record into the fields the gate needs."""
     source_item_ids = []
-    tiers = []
-    for sid in c.get("source_item_ids") or c.get("evidence_source_ids") or []:
+    # Accept the plural ``source_item_ids``/``evidence_source_ids`` and also the singular
+    # ``source_item_id`` produced by build_claim, so the gate consumes claims from either shape.
+    for sid in c.get("source_item_ids") or c.get("evidence_source_ids") or [c.get("source_item_id")]:
         if sid:
             source_item_ids.append(str(sid))
+    tiers = []
     for t in (c.get("tiers") or c.get("source_tiers") or []):
         tiers.append(t)
     return {
