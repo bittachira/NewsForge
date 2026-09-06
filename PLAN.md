@@ -28,6 +28,18 @@ The handoff flagged `stories/detector.py` as **written but not yet tested**. I v
 
 **Deferred (per handoff decision):** LLM-based CLUSTER step (§4) — kept the deterministic heuristic so P2 is testable offline; an LLM swap later changes only `classify_topic` and callers keep working. Claim engine, quality gate, AI editor follow in P3–P4.
 
+### P3 — Trust + Claim + Quality Gate + Decision Engine (in progress)
+
+**Goal:** make it *impossible* for low-trust / high-risk content to auto-publish. Evaluation flows STORY → SOURCE → CLAIM → EVIDENCE → CONTRADICTION → FRESHNESS → RISK → QUALITY → DECISION.
+
+**Design principles:** deterministic, explainable, reproducible, versioned; no LLM as authority for TRUST/RISK/QUALITY/PUBLISH/REJECT/WAIT. Pure functions first (unit-testable), thin persistence layer. Reuse existing enums (`ClaimStatus`, `DecisionState`, `HumanLoopVerdict`) and config (`TrustConfig`, `DecisionConfig`).
+
+**Database (§17):** extend `claims` with `story_id` + `source_item_id` provenance; add 5 tables — `claim_evidence` (unique `(claim_id, source_item_id)` → independent-source corroboration), `trust_evaluations`, `quality_evaluations`, `decisions` (upsert key `(target_type, target_id)` → idempotent + audit with reasons_json/policy_version), `review_tasks` (human queue lifecycle). All new FKs/indexes added; no historical migrations touched.
+
+**Modules (`src/newsforge/verify/`):** `claims.py`, `corroboration.py`, `freshness.py`, `trust.py`, `risk.py`, `quality.py`, `decide.py`.
+
+**Decision rules (§10):** RED+unsupported → REJECT; CONTRADICTED/conflicting evidence → WAIT/REVIEW; not-quality-passed → REVIEW/REJECT; GREEN+SUPPORTED+≥1 independent corroboration+quality pass → PUBLISH. RED / contradiction / missing-critical-evidence can never silently PUBLISH.
+
 ---
 
 ## 0. Brand & naming decisions (configurable)

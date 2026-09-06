@@ -14,7 +14,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Optional
 
-from sqlalchemy import BigInteger, ForeignKey, String, Text
+from sqlalchemy import BigInteger, ForeignKey, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .base import (
@@ -283,8 +283,12 @@ class claims(Base):
     __tablename__ = "claims"
 
     id: Mapped[str] = uuid_pk()
-    claim_id: Mapped[str] = mapped_column(String(128), default=lambda: str(uuid.uuid4()), index=True, nullable=False)
+    # Unique so re-detecting the same claim is idempotent (upsert) rather than duplicated (§17, Case 10).
+    claim_id: Mapped[str] = mapped_column(String(128), default=lambda: str(uuid.uuid4()), unique=True, index=True, nullable=False)
     article_id: Mapped[str | None] = mapped_column(ForeignKey("articles.id"), index=True, nullable=True)
+    # Provenance (§2): which STORY and SOURCE ITEM this claim came from.
+    story_id: Mapped[str | None] = mapped_column(String(128), index=True, nullable=True)
+    source_item_id: Mapped[str | None] = mapped_column(String(36), index=True, nullable=True)
     text: Mapped[str] = mapped_column(Text, nullable=False)
     source_url: Mapped[str | None] = mapped_column(String(2048))
     publication_date: Mapped[str | None] = ts_nullable()
@@ -305,8 +309,116 @@ class fact_checks(Base):
 
 
 # --------------------------------------------------------------------------- #
-# Knowledge graph (§5)
+# Verification & decisions (§1, §2, §6–§10) — new in P3
 # --------------------------------------------------------------------------- #
+class claim_evidence(Base):
+    """Independent evidence linking a CLAIM to the SOURCE ITEM that supports it (§3).
+
+    One row per (claim, source_item) pair. The unique constraint makes re-detection
+    idempotent and lets corroboration count DISTINCT sources: two rows from the same
+    underlying source do NOT count as independent support.
+    """
+    __tablename__ = "claim_evidence"
+
+    id: Mapped[str] = uuid_pk()
+    claim_id: Mapped[str] = mapped_column(String(128), ForeignKey("claims.id"), index=True, nullable=False)
+    source_item_id: Mapped[str] = mapped_column(String(36), ForeignKey("source_items.id"), index=True, nullable=False)
+    created_at: Mapped[str] = ts_col()
+
+    __table_args__ = (
+        UniqueConstraint("claim_id", "source_item_id", name="uq_claim_evidence_claim_source"),
+    )
+
+
+class trust_evaluations(Base):
+    """Structured, explainable TRUST score for a STORY or CLAIM (§6, §7).
+
+    The score is never opaque: factors_json records the positive/negative reasons so an
+    auditor can see exactly what drove the number. policy_version keeps evaluations
+    traceable to the rule set that produced them (§18).
+    """
+    __tablename__ = "trust_evaluations"
+
+    id: Mapped[str] = uuid_pk()
+    target_type: Mapped[str] = mapped_column(String(20), nullable=False)  # STORY / CLAIM
+    target_id: Mapped[str] = mapped_column(String(36), index=True, nullable=False)
+    trust_score: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    source_trust: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    independent_corroboration: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    total_evidence: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    contradiction_penalty: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    freshness_score: Mapped[float] = mapped_column(default=0.0, nullable=False)
+    risk_level: Mapped[str | None] = mapped_column(String(16))  # GREEN/YELLOW/ORANGE/RED
+    factors_json: Mapped[str | None] = json_col()
+    policy_version: Mapped[str] = mapped_column(String(32), default="p3.v1", nullable=False)
+    computed_at: Mapped[str] = ts_col()
+
+
+class quality_evaluations(Base):
+    """QUALITY GATE result for a STORY or CLAIM (§9).
+
+    passed=False means the content must not be auto-published. reasons_json is structured
+    (not free text) so failures can be filtered, reported and audited deterministically.
+    """
+    __tablename__ = "quality_evaluations"
+
+    id: Mapped[str] = uuid_pk()
+    target_type: Mapped[str] = mapped_column(String(20), nullable=False)  # STORY / CLAIM
+    target_id: Mapped[str] = mapped_column(String(36), index=True, nullable=False)
+    passed: Mapped[bool] = mapped_column(default=False, nullable=False)
+    score: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)  # 0-100 composite
+    reasons_json: Mapped[str | None] = json_col()
+    policy_version: Mapped[str] = mapped_column(String(32), default="p3.v1", nullable=False)
+    computed_at: Mapped[str] = ts_col()
+
+
+class decisions(Base):
+    """CONTENT DECISION ENGINE state-machine record (§10, §14).
+
+    Upserted by (target_type, target_id) so re-running the same evaluation is idempotent.
+    reasons_json + policy_version make every decision auditable: what was decided, why,
+    on which data, and under which rule version. human_override records when a reviewer
+    overrode the system's recommendation.
+    """
+    __tablename__ = "decisions"
+
+    id: Mapped[str] = uuid_pk()
+    target_type: Mapped[str] = mapped_column(String(20), nullable=False)  # STORY / CLAIM
+    target_id: Mapped[str] = mapped_column(String(36), index=True, nullable=False)
+    decision: Mapped[str] = mapped_column(String(20), default=DecisionState.PUBLISH.value, nullable=False)
+    risk_level: Mapped[str | None] = mapped_column(String(16))  # GREEN/YELLOW/ORANGE/RED
+    trust_score: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    reasons_json: Mapped[str | None] = json_col()
+    human_override: Mapped[bool] = mapped_column(default=False, nullable=False)
+    policy_version: Mapped[str] = mapped_column(String(32), default="p3.v1", nullable=False)
+    created_at: Mapped[str] = ts_col()
+    updated_at: Mapped[str] = ts_col(onupdate=ts)
+
+    __table_args__ = (
+        UniqueConstraint("target_type", "target_id", name="uq_decisions_target"),
+    )
+
+
+class review_tasks(Base):
+    """Human REVIEW QUEUE (§13).
+
+    A decision that cannot auto-publish (REVIEW/WAIT/REJECT) becomes a task with a
+    lifecycle: created → assigned → approved / rejected / edited / overridden. The backend
+    leaves this structure ready; no UI is built here.
+    """
+    __tablename__ = "review_tasks"
+
+    id: Mapped[str] = uuid_pk()
+    decision_id: Mapped[str] = mapped_column(String(36), ForeignKey("decisions.id"), index=True, nullable=False)
+    story_id: Mapped[str | None] = mapped_column(String(128), index=True, nullable=True)
+    claim_ids_json: Mapped[str | None] = json_col()
+    status: Mapped[str] = mapped_column(String(20), default="PENDING", nullable=False)  # PENDING/ASSIGNED/APPROVED/REJECTED/EDITED/OVERRIDDEN
+    assigned_to: Mapped[str | None] = mapped_column(String(128))
+    notes: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[str] = ts_col()
+    updated_at: Mapped[str] = ts_col(onupdate=ts)
+
+
 class entities(Base):
     __tablename__ = "entities"
 
