@@ -83,6 +83,23 @@ class DecisionState(str, Enum):
     ARCHIVE = "ARCHIVE"
 
 
+class PublicationStatus(str, Enum):
+    """PUBLICATION lifecycle (section 24).
+
+    The publisher owns this state machine. It is intentionally INDEPENDENT of ArticleStatus /
+    StoryStatus so a distribution failure on one channel never corrupts the story's own lifecycle
+    (section 24: a failure in one destination must not corrupt the global state of the Story).
+    Valid transitions are enforced by :func:`newsforge.publish.state.can_transition`.
+    """
+
+    PENDING = "PENDING"        # created, awaiting a distribution attempt
+    PUBLISHING = "PUBLISHING"  # actively distributing to destinations (transient)
+    COMPLETED = "COMPLETED"    # distributed to every configured destination successfully
+    SUPPRESSED = "SUPPRESSED"  # decision engine blocked it; nothing distributed (safety gate)
+    FAILED = "FAILED"          # one or more destination attempts failed (retryable, not story-global)
+    ARCHIVED = "ARCHIVED"      # retired
+
+
 class HumanLoopVerdict(str, Enum):
     GREEN = "GREEN"          # auto-publish
     YELLOW = "YELLOW"        # review recommended
@@ -684,3 +701,52 @@ class errors(Base):
     message: Mapped[str] = mapped_column(Text, nullable=False)
     context_json: Mapped[str | None] = json_col()
     created_at: Mapped[str] = ts_col()
+
+# --------------------------------------------------------------------------- #
+# Publishing & distribution (section 24) -- new in P4
+#
+# The publisher consumes the Decision Engine's persisted verdict and, only when it is
+# auto-publishable, distributes the story to one or more destinations. Every publication is
+# keyed by (story_id, destination_key) so re-running is idempotent; each attempt is recorded
+# separately so a failure on one channel never fails the story globally (section 24).
+# --------------------------------------------------------------------------- #
+class DestinationType(str, Enum):
+    WEBSITE = "WEBSITE"
+    RSS = "RSS"
+    NEWSLETTER = "NEWSLETTER"
+    SOCIAL = "SOCIAL"
+    FEEDS_API = "FEEDS_API"
+
+
+class publications(Base):
+    __tablename__ = "publications"
+
+    id: Mapped[str] = uuid_pk()
+    story_id: Mapped[str] = mapped_column(String(128), ForeignKey("stories.id"), index=True, nullable=False)
+    destination_key: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
+    decision_id: Mapped[str] = mapped_column(String(36), ForeignKey("decisions.id"), index=True, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default=PublicationStatus.PENDING.value, nullable=False)
+    # Stable identity of this (story, destination) pair -- the idempotency key (section 24).
+    idempotency_key: Mapped[str] = mapped_column(String(192), unique=True, index=True, nullable=False)
+    published_at: Mapped[str | None] = ts_nullable()
+    error_detail: Mapped[str | None] = json_col()
+    created_at: Mapped[str] = ts_col()
+    updated_at: Mapped[str] = ts_col(onupdate=ts)
+
+
+class publication_attempts(Base):
+    __tablename__ = "publication_attempts"
+
+    id: Mapped[str] = uuid_pk()
+    publication_id: Mapped[str] = mapped_column(String(36), ForeignKey("publications.id"), index=True, nullable=False)
+    destination_key: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="ATTEMPTING", nullable=False)  # ATTEMPTING/SUCCEEDED/FAILED
+    error_detail: Mapped[str | None] = json_col()
+    distributed_at: Mapped[str | None] = ts_nullable()
+    created_at: Mapped[str] = ts_col()
+
+    # One attempt per (publication, destination). Retrying a fixed channel updates this row in place
+    # rather than appending, so the audit trail stays compact and re-runs are idempotent.
+    __table_args__ = (
+        UniqueConstraint("publication_id", "destination_key", name="uq_publication_attempts_pub_dest"),
+    )
