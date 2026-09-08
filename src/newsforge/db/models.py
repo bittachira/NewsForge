@@ -750,3 +750,115 @@ class publication_attempts(Base):
     __table_args__ = (
         UniqueConstraint("publication_id", "destination_key", name="uq_publication_attempts_pub_dest"),
     )
+
+
+# --------------------------------------------------------------------------- #
+# Measurement + post-publish observability (section 27) -- new in P5
+#
+# These tables are READ-ONLY views over the REAL P4 artifacts (publications /
+# publication_attempts) plus lightweight snapshots and event logs. They NEVER
+# mutate decisions, trust_evaluations, quality_evaluations, articles or stories,
+# and they never re-derive editorial verdicts. Measurement is deterministic and
+# idempotent: a repeated operation collapses to a single row per key (§15/§17).
+# --------------------------------------------------------------------------- #
+
+class publication_metrics(Base):
+    """Granular measurement of ONE publish operation to one channel (section 27).
+
+    Derived from the real ``publications`` / ``publication_attempts`` rows -- never
+    duplicated or fabricated. Keyed by ``(story_id, destination_key, reference_time)`` so
+    re-measuring the same operation is an idempotent no-op."""
+    __tablename__ = "publication_metrics"
+
+    id: Mapped[str] = uuid_pk()
+    story_id: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
+    destination_key: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
+    reference_time: Mapped[str] = mapped_column(String(27), index=True, nullable=False)
+    n_attempts: Mapped[int] = mapped_column(default=0, nullable=False)
+    n_succeeded: Mapped[int] = mapped_column(default=0, nullable=False)
+    n_failed: Mapped[int] = mapped_column(default=0, nullable=False)
+    latency_ms_min: Mapped[float] = mapped_column(default=0.0, nullable=False)
+    latency_ms_max: Mapped[float] = mapped_column(default=0.0, nullable=False)
+    latency_ms_avg: Mapped[float] = mapped_column(default=0.0, nullable=False)
+    first_attempt_at: Mapped[str | None] = ts_nullable()
+    last_attempt_at: Mapped[str | None] = ts_nullable()
+    success: Mapped[bool] = mapped_column(default=False, nullable=False)
+    created_at: Mapped[str] = ts_col()
+
+    __table_args__ = (
+        UniqueConstraint("story_id", "destination_key", "reference_time",
+                         name="uq_publication_metrics_story_dest_time"),
+    )
+
+
+class destination_metrics(Base):
+    """Rollup of a DESTINATION's performance for a story at a reference time (section 27).
+
+    Aggregated by SQL over the real attempts grouped by destination -- a true rollup, not a
+    copy of a single ``publication_metrics`` row. Lets independent destinations be inspected in
+    isolation: a failure on one channel never contaminates another's metrics (§15/§24)."""
+    __tablename__ = "destination_metrics"
+
+    id: Mapped[str] = uuid_pk()
+    story_id: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
+    destination_key: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
+    reference_time: Mapped[str] = mapped_column(String(27), index=True, nullable=False)
+    total_publications: Mapped[int] = mapped_column(default=0, nullable=False)
+    total_attempts: Mapped[int] = mapped_column(default=0, nullable=False)
+    n_succeeded: Mapped[int] = mapped_column(default=0, nullable=False)
+    n_failed: Mapped[int] = mapped_column(default=0, nullable=False)
+    avg_latency_ms: Mapped[float] = mapped_column(default=0.0, nullable=False)
+    success_rate: Mapped[float] = mapped_column(default=0.0, nullable=False)
+    created_at: Mapped[str] = ts_col()
+
+    __table_args__ = (
+        UniqueConstraint("story_id", "destination_key", "reference_time",
+                         name="uq_destination_metrics_story_dest_time"),
+    )
+
+
+class published_snapshots(Base):
+    """Snapshot of a story's EDITORIAL state at publication time (section 27).
+
+    Read-only capture: it never mutates the Story row. Kept keyed by ``(story_id, reference_time)``
+    so capturing is idempotent and post-publish change detection can hash what was published vs
+    what the story is now (§28)."""
+    __tablename__ = "published_snapshots"
+
+    id: Mapped[str] = uuid_pk()
+    story_id: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
+    reference_time: Mapped[str] = mapped_column(String(27), index=True, nullable=False)
+    title: Mapped[str | None] = mapped_column(Text, nullable=False)
+    summary: Mapped[str | None] = mapped_column(Text, nullable=False)
+    slug: Mapped[str] = mapped_column(String(300), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    trust_score: Mapped[int] = mapped_column(default=0, nullable=False)
+    published_at: Mapped[str | None] = ts_nullable()
+    created_at: Mapped[str] = ts_col()
+
+    __table_args__ = (
+        UniqueConstraint("story_id", "reference_time", name="uq_published_snapshots_story_time"),
+    )
+
+
+class postpublish_events(Base):
+    """Deterministic event log for post-publish monitoring + provenance (§28/§29).
+
+    One row per logical event. Idempotent by ``(event_type, story_id, reference_time)`` so re-running a
+    scan or a needs-update marking does not duplicate events. Structured enough to reconstruct the
+    full Story -> Decision -> Publication -> Attempt -> Outcome chain (§29)."""
+    __tablename__ = "postpublish_events"
+
+    id: Mapped[str] = uuid_pk()
+    event_type: Mapped[str] = mapped_column(String(32), nullable=False)  # SNAPSHOT / CHANGE_DETECTED / STALE_DETECTED / NEEDS_UPDATE
+    story_id: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
+    decision_id: Mapped[str | None] = mapped_column(String(36), index=True, nullable=True)
+    publication_id: Mapped[str | None] = mapped_column(String(36), index=True, nullable=True)
+    reference_time: Mapped[str] = mapped_column(String(27), index=True, nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=False)
+    payload_json: Mapped[str | None] = json_col()
+    created_at: Mapped[str] = ts_col()
+
+    __table_args__ = (
+        UniqueConstraint("event_type", "story_id", "reference_time", name="uq_postpublish_events"),
+    )

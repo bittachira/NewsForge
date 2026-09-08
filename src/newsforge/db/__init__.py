@@ -7,6 +7,7 @@ from newsforge.db.models import (  # noqa: F401
     newsletters, subscriptions, affiliate_links, affiliate_clicks, ad_slots,
     analytics, ai_jobs, ai_runs, experiments, notifications, content_scores,
     audit_logs, errors, publications, publication_attempts, PublicationStatus, DestinationType,
+    publication_metrics, destination_metrics, published_snapshots, postpublish_events,
 )
 from newsforge.db.session import (  # noqa: F401
     build_engine, get_session_factory, set_session_factory, switch_default_database,
@@ -23,6 +24,8 @@ __all__ = [
     "analytics", "ai_jobs", "ai_runs", "experiments", "notifications", "content_scores",
     "audit_logs", "errors", "publications", "publication_attempts",
     "PublicationStatus", "DestinationType",
+    # Measurement + post-publish observability (section 27) -- new in P5
+    "publication_metrics", "destination_metrics", "published_snapshots", "postpublish_events",
     "build_engine", "get_session_factory", "set_session_factory",
     "switch_default_database", "use_isolated_database", "use_isolated_database_ctx",
     "get_session", "init_db",
