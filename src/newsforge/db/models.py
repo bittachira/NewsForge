@@ -862,3 +862,62 @@ class postpublish_events(Base):
     __table_args__ = (
         UniqueConstraint("event_type", "story_id", "reference_time", name="uq_postpublish_events"),
     )
+# --------------------------------------------------------------------------- #
+# Generated editorial artifacts (P6) — deterministic, evidence-bound generation
+# --------------------------------------------------------------------------- #
+class ArtifactFormat(str, Enum):
+    """Editorial formats a story can be generated into (P6)."""
+    ARTICLE = "ARTICLE"
+    BRIEF = "BRIEF"
+    NEWSLETTER = "NEWSLETTER"
+    SOCIAL = "SOCIAL"
+    VIDEO_SCRIPT = "VIDEO_SCRIPT"
+    TIMELINE = "TIMELINE"
+    FAQ = "FAQ"
+
+
+class GenerationState(str, Enum):
+    """Lifecycle of a generated artifact (P6).
+
+    GENERATED -> content produced by the generator.
+    VALIDATED -> structural validation passed; the row is auditable.
+    INVALID   -> validation failed; the artifact must never be treated as publishable.
+    """
+    GENERATED = "GENERATED"
+    VALIDATED = "VALIDATED"
+    INVALID = "INVALID"
+
+
+class generated_artifacts(Base):
+    """Generated editorial artifact for one (story, format) pair (P6).
+
+    Deterministic and idempotent: ``artifact_id`` is the SHA-256 of
+    ``(story_id, format, generator_version, template_version)``, so the same logical
+    generation always maps to the same row. The generation layer only READS editorial
+    state (stories/claims/evidence/decisions) and writes here — it never mutates those
+    tables and never publishes (§11). ``publishable`` is a derived property of the
+    artifact; it does NOT replace the publisher's :func:`is_auto_publishable` gate.
+    """
+    __tablename__ = "generated_artifacts"
+
+    id: Mapped[str] = uuid_pk()
+    # Deterministic business key: SHA-256(story_id|format|generator_version|template_version).
+    artifact_id: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    story_id: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
+    decision_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("decisions.id"), index=True, nullable=True)
+    format: Mapped[str] = mapped_column(String(20), default=ArtifactFormat.ARTICLE.value, nullable=False)
+    title: Mapped[str | None] = mapped_column(Text)
+    summary: Mapped[str | None] = mapped_column(Text)
+    body_json: Mapped[str | None] = json_col()
+    claim_refs_json: Mapped[str | None] = json_col()
+    excluded_claims_json: Mapped[str | None] = json_col()
+    generator_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    template_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    model_name: Mapped[str | None] = mapped_column(String(128))
+    deterministic: Mapped[bool] = mapped_column(default=True, nullable=False)
+    state: Mapped[str] = mapped_column(String(16), default=GenerationState.GENERATED.value, nullable=False)
+    publishable: Mapped[bool] = mapped_column(default=False, nullable=False)
+    validation_json: Mapped[str | None] = json_col()
+    reference_time: Mapped[str | None] = ts_nullable()
+    created_at: Mapped[str] = ts_col()
+    updated_at: Mapped[str] = ts_col(onupdate=ts)

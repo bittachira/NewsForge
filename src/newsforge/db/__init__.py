@@ -8,6 +8,7 @@ from newsforge.db.models import (  # noqa: F401
     analytics, ai_jobs, ai_runs, experiments, notifications, content_scores,
     audit_logs, errors, publications, publication_attempts, PublicationStatus, DestinationType,
     publication_metrics, destination_metrics, published_snapshots, postpublish_events,
+    generated_artifacts, ArtifactFormat, GenerationState,
 )
 from newsforge.db.session import (  # noqa: F401
     build_engine, get_session_factory, set_session_factory, switch_default_database,
@@ -26,6 +27,8 @@ __all__ = [
     "PublicationStatus", "DestinationType",
     # Measurement + post-publish observability (section 27) -- new in P5
     "publication_metrics", "destination_metrics", "published_snapshots", "postpublish_events",
+    # Generated editorial artifacts (P6) -- deterministic, evidence-bound generation
+    "generated_artifacts", "ArtifactFormat", "GenerationState",
     "build_engine", "get_session_factory", "set_session_factory",
     "switch_default_database", "use_isolated_database", "use_isolated_database_ctx",
     "get_session", "init_db",
