@@ -215,8 +215,8 @@ def test_idempotent_rerun():
         item = _seed_item(s, source_id="src-idem", title="The tax is three euros.")
 
     ref = "2026-09-05T12:00:00+00:00"
-    run1 = run_pipeline(signal_ids=[item], reference_time=ref)
-    run2 = run_pipeline(signal_ids=[item], reference_time=ref)
+    run1 = run_pipeline(signal_ids=[item], reference_time=ref, destinations=["recording"])
+    run2 = run_pipeline(signal_ids=[item], reference_time=ref, destinations=["recording"])
 
     o1 = run1["outcomes"][0]
     o2 = run2["outcomes"][0]

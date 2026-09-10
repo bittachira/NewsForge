@@ -67,6 +67,16 @@ class AiConfig:
     # Which provider the router selects for a given task size (see ai/router.py).
     default_provider: str = os.getenv("NEWSFORGE_DEFAULT_PROVIDER", "mock")
 
+    # Real-provider cost model (USD per 1k tokens, combined in+out). Only used
+    # when ``mock=False``; MOCK tier keeps ``mock_cost_per_1k_tokens``.
+    cost_per_1k_tokens: float = float(os.getenv("NEWSFORGE_AI_COST_PER_1K", "0.0") or "0.0")
+
+    # Real-provider timeout (seconds) for a single generate call.
+    request_timeout_s: float = float(os.getenv("NEWSFORGE_AI_TIMEOUT_S", "30") or "30")
+
+    # Max completion tokens requested from a real provider.
+    max_tokens: int = int(os.getenv("NEWSFORGE_AI_MAX_TOKENS", "500") or "500")
+
     # Cost / latency tuning per model tier.
     small_model: str = os.getenv("NEWSFORGE_SMALL_MODEL", "gpt-4o-mini")
     medium_model: str = os.getenv("NEWSFORGE_MEDIUM_MODEL", "gpt-4o")

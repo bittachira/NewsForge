@@ -207,9 +207,11 @@ def _editorial_snapshot_fields(session, story_id):
     story = session.query(stories).filter_by(id=str(story_id)).first()
     if story is None:
         return None
+    # ``title``/``summary`` are NOT NULL on the snapshot row but may be NULL on the story;
+    # coerce missing text to "" so the read-only observer never fails on a sparse story.
     return {
-        "title": story.title,
-        "summary": story.summary,
+        "title": story.title or "",
+        "summary": story.summary or "",
         "slug": story.slug,
         "status": str(story.status),
         "trust_score": int(getattr(story, "trust_score", 0) or 0),

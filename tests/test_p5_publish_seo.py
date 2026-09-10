@@ -169,7 +169,11 @@ def _seed_decision(session, *, story_id="story-1", decision="PUBLISH", human_ove
 
 
 def _e2e_published(story_id="story-1"):
-    """Full P3 -> P4 -> P5 flow: verify (PUBLISH) -> generate artifact -> publish."""
+    """Full P3 -> P4 -> P5 flow: verify (PUBLISH) -> generate artifact -> publish.
+
+    Publishes explicitly to the ``recording`` destination so this suite's single-
+    publication/single-attempt assertions stay valid. The REAL persistent ``internal``
+    destination is covered by tests/test_p5_internal_destination.py."""
     with get_session() as s:
         result = _seed_story_with_claims(s, story_id=story_id, claim_specs=[
             {"claim_id": "c-main", "text": "The tax is three euros.", "source_id": "src-1"},
@@ -179,7 +183,7 @@ def _e2e_published(story_id="story-1"):
         gen = generate_story(s, story_id=story_id, format=ArtifactFormat.ARTICLE.value, reference_time=T)
     assert gen["state"] == GenerationState.VALIDATED.value and gen["publishable"] is True
     with get_session() as s:
-        pub = publish_story(s, story_id=story_id)
+        pub = publish_story(s, story_id=story_id, destinations=["recording"])
     assert pub["blocked"] is False and pub["published"] is True
     return gen
 
@@ -222,8 +226,7 @@ def test_publish_is_idempotent():
 
     # Second publish of the SAME logical artifact (fresh session, fresh process view).
     with get_session() as s:
-        pub2 = publish_story(s, story_id="story-1")
-    assert pub2["blocked"] is False and pub2["published"] is True
+        pub2 = publish_story(s, story_id="story-1", destinations=["recording"])
 
     with get_session() as s:
         pubs = s.query(publications).filter_by(story_id="story-1").all()

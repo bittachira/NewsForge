@@ -8,6 +8,7 @@ from __future__ import annotations
 from .destinations import (
     Destination,
     DistributionOutcome,
+    InternalDestination,
     RecordingDestination,
     available_keys,
     get_destination,
@@ -37,6 +38,7 @@ __all__ = [
     "Destination",
     "DistributionOutcome",
     "RecordingDestination",
+    "InternalDestination",
     "register",
     "register_builtin_destinations",
     "available_keys",
