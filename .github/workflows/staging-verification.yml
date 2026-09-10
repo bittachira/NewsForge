@@ -133,6 +133,51 @@ jobs:
             ALL_PASSED=false
           fi
 
+          # Ops observability: /live is static 200, /ready mirrors DB health, request
+          # correlation header and internal /metrics (admin-gated) behave as specified.
+          LIVE_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8090/live 2>/dev/null || echo "000")
+          if [ "$LIVE_STATUS" = "200" ]; then
+            echo "✓ /live: HTTP 200 OK"
+          else
+            echo "✗ /live: HTTP ${LIVE_STATUS}"
+            ALL_PASSED=false
+          fi
+          READY_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8090/ready 2>/dev/null || echo "000")
+          if [ "$READY_STATUS" = "200" ]; then
+            echo "✓ /ready: HTTP 200 OK"
+          else
+            echo "✗ /ready: HTTP ${READY_STATUS}"
+            ALL_PASSED=false
+          fi
+          REQID=$(curl -s -D - -o /dev/null -H "X-Request-ID: ci-smoke-1" http://localhost:8090/health 2>/dev/null | tr -d '\r' | awk 'tolower($1)=="x-request-id:"{print $2}')
+          if [ "$REQID" = "ci-smoke-1" ]; then
+            echo "✓ X-Request-ID echoed: ${REQID}"
+          else
+            echo "✗ X-Request-ID not echoed (got '${REQID}')"
+            ALL_PASSED=false
+          fi
+          METRICS_DENY=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8090/metrics 2>/dev/null || echo "000")
+          if [ "$METRICS_DENY" = "403" ]; then
+            echo "✓ /metrics (unauthorized): denied with 403"
+          else
+            echo "✗ /metrics unauthorized: HTTP ${METRICS_DENY} (expected 403)"
+            ALL_PASSED=false
+          fi
+          METRICS_OK_CODE=$(curl -s -o /dev/null -w "%{http_code}" -H "X-Admin-Token: ci-admin-token" http://localhost:8090/metrics 2>/dev/null || echo "000")
+          METRICS_OK=$(curl -s -H "X-Admin-Token: ci-admin-token" http://localhost:8090/metrics 2>/dev/null || echo "")
+          if [ "$METRICS_OK_CODE" = "200" ]; then
+            echo "✓ /metrics (authorized): HTTP 200 OK"
+          else
+            echo "✗ /metrics authorized: HTTP ${METRICS_OK_CODE}"
+            ALL_PASSED=false
+          fi
+          if echo "$METRICS_OK" | grep -q '"schema_version"'; then
+            echo "✓ /metrics exposes build/schema info"
+          else
+            echo "✗ /metrics missing schema_version in body"
+            ALL_PASSED=false
+          fi
+
           # Auto-docs are disabled: /docs, /redoc, /openapi.json must be hidden (404).
           for endpoint in /docs /redoc /openapi.json; do
             DOCS_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8090${endpoint} 2>/dev/null || echo "000")

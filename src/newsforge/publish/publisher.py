@@ -25,9 +25,12 @@ Story/Article rows that P1/P2 own, so distribution problems cannot affect editor
 from __future__ import annotations
 
 import hashlib
+import time
 
 from sqlalchemy.exc import IntegrityError
 
+from newsforge.core.logger import get_logger, log_event
+from newsforge.core.metrics import metrics
 from newsforge.db.models import (
     DecisionState,
     PublicationStatus,
@@ -41,6 +44,12 @@ from newsforge.db.session import get_session
 from newsforge.verify.persist import is_auto_publishable
 from .destinations import DistributionOutcome, get_destination, register_builtin_destinations
 from .state import InvalidTransitionError, PublicationStateMachine
+
+logger = get_logger("publish.publisher")
+
+
+def _ms(started: float) -> int:
+    return int(round((time.monotonic() - started) * 1000.0))
 
 
 def idempotency_key(story_id: str, destination_key: str) -> str:
@@ -106,14 +115,38 @@ def _attempt_destination(session, publication, destination_key: str) -> Distribu
     destination can never crash the whole publish operation (§24)."""
     dest = get_destination(destination_key)
     if dest is None:
-        return DistributionOutcome(succeeded=False, error=f"unknown destination {destination_key!r}")
+        outcome = DistributionOutcome(succeeded=False, error=f"unknown destination {destination_key!r}")
+        _record_attempt_observability(destination_key, outcome, time.monotonic())
+        return outcome
+    started = time.monotonic()
+    raised = False
     try:
         outcome = dest.publish(payload=_publication_payload(_decision_of(session, publication), publication.story_id,
                                                             destination_key))
     except Exception as exc:  # noqa: BLE001 - isolate ANY failure to this channel (§24)
-        return DistributionOutcome(succeeded=False, error=f"{type(exc).__name__}: {exc}")
-    _persist_attempt(session, publication, destination_key, outcome)
+        raised = True
+        outcome = DistributionOutcome(succeeded=False, error=f"{type(exc).__name__}: {exc}")
+    _record_attempt_observability(destination_key, outcome, started)
+    if not raised:
+        _persist_attempt(session, publication, destination_key, outcome)
     return outcome
+
+
+def _record_attempt_observability(destination_key: str, outcome: DistributionOutcome, started: float) -> None:
+    """Structured log + operational metric for one destination attempt (OPS_OBSERVABILITY §11).
+
+    Deliberately does NOT persist into the ``errors`` table: destination failures are
+    already handled AND persisted as FAILED ``publication_attempts`` rows — recording them
+    again as critical errors would duplicate an already-correctly-handled condition."""
+    success = bool(outcome.ok)
+    fields = {"result": "success" if success else "failed",
+              "duration_ms": _ms(started), "destination": destination_key}
+    if not success:
+        fields["error_type"] = str(outcome.error or "").split(":", 1)[0] or "DestinationError"
+        fields["error_message"] = str(outcome.error or "")
+    log_event(logger, "publish_destination_attempt", **fields)
+    metrics().inc("publication_attempts_total",
+                  tags={"destination": destination_key, "result": "success" if success else "failed"})
 
 
 def _decision_of(session, publication):

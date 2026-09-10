@@ -15,11 +15,21 @@ server response and may vary.
 from __future__ import annotations
 
 import hashlib
+import time
 from dataclasses import dataclass
 from typing import Optional
 
 from newsforge.config import AiConfig
+from newsforge.core.error_tracker import persist_error
+from newsforge.core.logger import get_logger, log_event, redact_text
+from newsforge.core.metrics import metrics
 from newsforge.db.models import AiJobStatus, AiTaskType, ai_jobs, ai_runs
+
+ai_logger = get_logger("ai.router")
+
+
+def _ms(started: float) -> int:
+    return int(round((time.monotonic() - started) * 1000.0))
 
 
 @dataclass(frozen=True)
@@ -103,20 +113,30 @@ class AiRouter:
         dict or any error message.
         """
         route = self.route(task_type)
+        started = time.monotonic()
         if route.mock:
-            return {
-                "text": _mock_completion(input_text),
+            completion = _mock_completion(input_text)
+            out = {
+                "text": completion,
                 "tokens_input": self.estimate_tokens(input_text),
-                "tokens_output": self.estimate_tokens(_mock_completion(input_text)),
+                "tokens_output": self.estimate_tokens(completion),
                 "cost_usd": self.compute_cost(
                     self.estimate_tokens(input_text),
-                    self.estimate_tokens(_mock_completion(input_text)),
+                    self.estimate_tokens(completion),
                     route=route,
                 ),
                 "model": route.model,
                 "provider": route.provider,
                 "mock": True,
             }
+            log_event(ai_logger, "ai_generation_end", result="success",
+                      provider=route.provider, model=route.model, mock=True,
+                      duration_ms=int(self.config.mock_latency_ms),
+                      cost_usd=out["cost_usd"], tokens_input=out["tokens_input"],
+                      tokens_output=out["tokens_output"])
+            metrics().inc("ai_generations_total",
+                          tags={"provider": route.provider, "result": "success"})
+            return out
 
         key = self._api_key(route)
         if not key:
@@ -140,38 +160,62 @@ class AiRouter:
         }
         headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
         try:
-            resp = httpx.post(
-                url, json=body, headers=headers, timeout=self.config.request_timeout_s
-            )
-        except (httpx.HTTPError, OSError, ValueError, TimeoutError) as exc:  # transport/DNS/bad-URL
-            raise ProviderError(
-                f"provider request failed: {type(exc).__name__}: {_redact(key, exc)}"
-            ) from exc
-        if resp.status_code != 200:
-            detail = resp.text[:200] if resp.text else "no body"
-            raise ProviderError(
-                f"provider returned HTTP {resp.status_code}: {_redact(key, detail)}"
-            )
+            try:
+                resp = httpx.post(
+                    url, json=body, headers=headers, timeout=self.config.request_timeout_s
+                )
+            except (httpx.HTTPError, OSError, ValueError, TimeoutError) as exc:  # transport/DNS/bad-URL
+                raise ProviderError(
+                    f"provider request failed: {type(exc).__name__}: {_redact(key, exc)}"
+                ) from exc
+            if resp.status_code != 200:
+                detail = resp.text[:200] if resp.text else "no body"
+                raise ProviderError(
+                    f"provider returned HTTP {resp.status_code}: {_redact(key, detail)}"
+                )
 
-        try:
-            data = resp.json()
-            text = data["choices"][0]["message"]["content"]
-        except (ValueError, KeyError, IndexError, TypeError) as exc:
-            raise ProviderError(f"malformed provider response: {type(exc).__name__}") from exc
-        if not isinstance(text, str) or not text.strip():
-            raise ProviderError("provider returned empty completion")
+            try:
+                data = resp.json()
+                text = data["choices"][0]["message"]["content"]
+            except (ValueError, KeyError, IndexError, TypeError) as exc:
+                raise ProviderError(f"malformed provider response: {type(exc).__name__}") from exc
+            if not isinstance(text, str) or not text.strip():
+                raise ProviderError("provider returned empty completion")
 
-        tokens_in = int(data.get("usage", {}).get("prompt_tokens") or self.estimate_tokens(input_text))
-        tokens_out = int(data.get("usage", {}).get("completion_tokens") or self.estimate_tokens(text))
-        return {
-            "text": text,
-            "tokens_input": tokens_in,
-            "tokens_output": tokens_out,
-            "cost_usd": self.compute_cost(tokens_in, tokens_out, route=route),
-            "model": route.model,
-            "provider": route.provider,
-            "mock": False,
-        }
+            tokens_in = int(data.get("usage", {}).get("prompt_tokens") or self.estimate_tokens(input_text))
+            tokens_out = int(data.get("usage", {}).get("completion_tokens") or self.estimate_tokens(text))
+            out = {
+                "text": text,
+                "tokens_input": tokens_in,
+                "tokens_output": tokens_out,
+                "cost_usd": self.compute_cost(tokens_in, tokens_out, route=route),
+                "model": route.model,
+                "provider": route.provider,
+                "mock": False,
+            }
+        except ProviderError as exc:
+            duration_ms = _ms(started)
+            safe_msg = redact_text(str(exc))
+            log_event(ai_logger, "ai_generation_failed", level=30,
+                      provider=route.provider, model=route.model, mock=False,
+                      error_type="ProviderError", error_message=safe_msg,
+                      duration_ms=duration_ms)
+            metrics().inc("ai_generations_total",
+                          tags={"provider": route.provider, "result": "failure"})
+            metrics().inc("ai_failures_total",
+                          tags={"provider": route.provider, "error_type": "ProviderError"})
+            persist_error(module="ai.router", error_type="ProviderError",
+                          message=safe_msg,
+                          context={"provider": route.provider, "model": route.model})
+            raise
+
+        log_event(ai_logger, "ai_generation_end", result="success",
+                  provider=route.provider, model=route.model, mock=False,
+                  duration_ms=_ms(started), cost_usd=out["cost_usd"],
+                  tokens_input=out["tokens_input"], tokens_output=out["tokens_output"])
+        metrics().inc("ai_generations_total",
+                      tags={"provider": route.provider, "result": "success"})
+        return out
 
 
 _SYSTEM_PROMPT = (

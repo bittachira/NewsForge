@@ -21,7 +21,7 @@ import xml.etree.ElementTree as ET
 from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 from datetime import datetime, timezone
 
-from newsforge.core.logger import get_logger
+from newsforge.core.logger import get_logger, log_event
 from newsforge.core.netguard import SSRFError, assert_public_target
 from newsforge.db.session import get_session
 from newsforge.db.models import SourceType, SourceTier, source_items
@@ -92,7 +92,10 @@ async def fetch_url(url: str, *, timeout: float = DEFAULT_TIMEOUT, max_retries: 
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError) as exc:
             last_err = exc
             wait = BACKOFF_BASE * (2 ** (attempt - 1))
-            logger.warning("fetch %s attempt %d failed: %s; retry in %.1fs", url, attempt, exc, wait)
+            log_event(logger, "fetch_retry", level=30, attempt=attempt,
+                      error_type=type(exc).__name__,
+                      error_message=str(exc)[:200],
+                      message=f"fetch {url!r} attempt {attempt}/{max_retries} failed; retry in {wait:.1f}s")
             await asyncio.sleep(wait)
     raise RuntimeError(f"Failed to fetch {url}: {last_err}")
 
@@ -278,7 +281,8 @@ def parse_content(content_type: str | None, raw_text: str) -> list[dict]:
             import json as _json  # local import to avoid top-level cost
             return parse_json_api(_json.loads(raw_text))
         except (ValueError, TypeError) as exc:  # JSONDecodeError is a ValueError
-            logger.warning("JSON parse failed for %s: %s", raw_text, exc)
+            log_event(logger, "json_parse_failed", level=30, error_type=type(exc).__name__,
+                      error_message=str(exc))
             return []
 
     # Official / government / scientific pages are fetched and cleaned as HTML.
@@ -289,7 +293,7 @@ def parse_content(content_type: str | None, raw_text: str) -> list[dict]:
     # Default: treat as an RSS/Atom/XML feed.
     parsed = parse_rss(raw_text)
     if not parsed:
-        logger.info("No structured items extracted from %s; falling back to HTML.", raw_text[:80])
+        log_event(logger, "rss_parse_fallback", message="no structured items extracted; falling back to HTML")
         html_data = extract_from_html(raw_text)
         return [html_data] if html_data.get("title") else []
     return parsed
@@ -332,12 +336,13 @@ async def ingest_source(source: dict) -> IngestResult:
         raw_text = await fetch_url(url)
         items = parse_content(content_type, raw_text)
     except Exception as exc:  # noqa: BLE001
-        logger.error("ingest %s failed: %s", source_id, exc)
+        log_event(logger, "source_ingest_failed", level=40, source_id=source_id,
+                  error_type=type(exc).__name__, error_message=str(exc))
         result.errors.append(f"fetch/parse error for {source_id}: {exc}")
         return result
 
     if not items:
-        logger.info("No items parsed from %s (%d bytes).", url, len(raw_text))
+        log_event(logger, "source_ingest_empty", source_id=source_id, message="no items parsed")
         result.errors.append(f"no items parsed from {url}")
         return result
 
@@ -375,6 +380,7 @@ async def ingest_source(source: dict) -> IngestResult:
         result.added = len(seen)   # seen only holds NEW keys (dups are skipped, never added)
         result.skipped_dupe = skipped
     except Exception as exc:  # noqa: BLE001
-        logger.error("ingest %s DB step failed: %s", source_id, exc)
+        log_event(logger, "source_ingest_db_failed", level=40, source_id=source_id,
+                  error_type=type(exc).__name__, error_message=str(exc))
         result.errors.append(f"db error for {source_id}: {exc}")
     return result

@@ -8,6 +8,9 @@ story summary is shown (no new facts).
 
 Routes:
   GET /health            -> minimal public health probe (HTTP 503 on unhealthy, no details)
+  GET /live              -> liveness: the process is alive (always 200 when serving)
+  GET /ready             -> readiness: DB reachable (200) or 503 without details
+  GET /metrics           -> INTERNAL, admin-gated operational metrics + build info
   GET /articles          -> SSR list of published articles
   GET /articles/{slug}   -> SSR article page with JSON-LD, canonical, OG, Twitter cards
   GET /sitemap.xml       -> sitemap of published article URLs
@@ -15,8 +18,11 @@ Routes:
   GET /analytics         -> INTERNAL BI dashboard (requires NEWSFORGE_ADMIN_TOKEN)
 
 Security (OPS hardening): FastAPI auto-docs (/docs, /redoc, /openapi.json) are disabled;
-the analytics/BI route is gated by an admin token and fails closed; /health never echoes
-exception text (fixed literals only, correct 503 on failure).
+the analytics/BI + /metrics routes are gated by an admin token and fail closed; /health,
+/live and /ready never echo exception text (fixed literals only, correct 503 on failure);
+every request is correlated via X-Request-ID (see newsforge.web.middleware) and logged as
+structured JSON lines; /metrics exposes build metadata (git commit, schema version) only
+after authentication and never exposes secrets.
 """
 from __future__ import annotations
 
@@ -33,7 +39,9 @@ from fastapi.templating import Jinja2Templates
 
 from newsforge.analytics import content_roi_query, total_ai_cost
 from newsforge.config import BrandConfig
-from newsforge.core.logger import get_logger
+from newsforge.core.build_info import get_build_info
+from newsforge.core.logger import get_logger, log_event
+from newsforge.core.metrics import metrics
 from newsforge.db import get_session, init_db, generated_artifacts, publications, stories
 from newsforge.db.models import PublicationStatus, from_jsonable
 from newsforge.seo.feeds import render_rss_xml, render_sitemap_xml
@@ -44,6 +52,7 @@ from newsforge.seo.meta import (
     render_jsonld_script,
     twitter_card_tags,
 )
+from newsforge.web.middleware import install_request_id_middleware
 
 logger = get_logger("web.app")
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
@@ -149,10 +158,18 @@ def create_app() -> FastAPI:
     async def _lifespan(app: FastAPI):
         # Ensure the SQLite schema exists before serving (fresh /data volume).
         init_db()
+        info = get_build_info()
+        log_event(logger, "app_startup",
+                  version=info["version"],
+                  git_commit=info["git_commit"],
+                  build_time=info["build_time"],
+                  python_version=info["python_version"],
+                  schema_version=str(info["schema_version"]))
         yield
 
     app = FastAPI(title="NewsForge Web", lifespan=_lifespan,
                   docs_url=None, redoc_url=None, openapi_url=None)
+    install_request_id_middleware(app)
     templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
     brand = BrandConfig()
 
@@ -223,6 +240,45 @@ def create_app() -> FastAPI:
                 content={"status": "unhealthy", "db": "disconnected"},
             )
         return {"status": "ok", "db": "connected"}
+
+    @app.get("/live", response_model=dict)
+    def liveness():
+        """Liveness: the process is alive. No dependencies are consulted.
+
+        Deliberately static — any HTTP 200 here proves the worker is serving, which is
+        the whole contract of a liveness probe (§ liveness)."""
+        return {"status": "alive"}
+
+    @app.get("/ready", response_model=dict)
+    def readiness():
+        """Readiness: the app can serve traffic.
+
+        Requires the persistence layer to be reachable. Returns 503 with fixed literals
+        (no DSN, exception text or internal paths) when a critical dependency is down."""
+        try:
+            with get_session() as s:
+                s.execute(text("SELECT 1"))
+        except Exception:  # noqa: BLE001 - readiness probes must never leak internals
+            metrics().inc("db_errors_total", tags={"component": "readiness"})
+            logger.warning("readiness check reported not ready")
+            return JSONResponse(
+                status_code=503,
+                content={"status": "not ready", "db": "disconnected"},
+            )
+        return JSONResponse({"status": "ready", "db": "connected"})
+
+    @app.get("/metrics")
+    def metrics_endpoint(request: Request):
+        """INTERNAL operational metrics + build info (admin-gated, fail closed).
+
+        Returns the process-local metric snapshot alongside build/deployment metadata
+        (version, git commit, build time, python + schema versions). Never contains
+        secrets; request_id/story/artifact/... are never metric tags (§5/§6)."""
+        if not _internal_allowed(request):
+            raise HTTPException(status_code=403, detail="forbidden")
+        return JSONResponse(
+            content={"metrics": metrics().snapshot(), "build": get_build_info()}
+        )
 
     return app
 

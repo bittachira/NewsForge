@@ -156,6 +156,14 @@ def get_session_factory() -> sessionmaker:
     return factory
 
 
+def is_database_initialized() -> bool:
+    """True when the shared engine has been built already.
+
+    Used by best-effort subsystems (e.g. error tracking) so they can probe for an
+    available database WITHOUT triggering engine creation as a side effect."""
+    return _default_engine is not None
+
+
 @contextmanager
 def get_session() -> Iterator[Session]:
     """Context manager yielding a Session bound to the shared engine."""

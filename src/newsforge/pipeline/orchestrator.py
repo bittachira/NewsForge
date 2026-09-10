@@ -20,16 +20,25 @@ Design principles:
 from __future__ import annotations
 
 import hashlib
-import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Optional, Sequence
 
+import time
+
+from newsforge.core.error_tracker import persist_error
+from newsforge.core.logger import get_logger, log_event
+from newsforge.core.metrics import metrics
 from newsforge.db import (
     get_session, source_items, sources, stories, story_signals,
 )
+from newsforge.pipeline.context import new_run_context
 
-logger = logging.getLogger("newsforge.pipeline")
+logger = get_logger("pipeline.orchestrator")
+
+
+def _ms(started: float) -> int:
+    return int(round((time.monotonic() - started) * 1000.0))
 
 
 # --------------------------------------------------------------------------- #
@@ -190,6 +199,10 @@ def run_pipeline(
     else:
         ref_iso = None  # let downstream modules derive from real timestamps
 
+    # Operational correlation: one run_id per pipeline invocation (S10).
+    ctx = new_run_context()
+    log_event(logger, "pipeline_start", run_id=ctx.run_id, request_id=ctx.request_id)
+
     # ------------------------------------------------------------------ #
     # Destination registry
     # ------------------------------------------------------------------ #
@@ -204,17 +217,45 @@ def run_pipeline(
         import asyncio
         from newsforge.sources.engine import ingest_source
 
+        t0 = time.monotonic()
+        log_event(logger, "phase_start", phase="INGEST", run_id=ctx.run_id,
+                  request_id=ctx.request_id)
         try:
             asyncio.run(ingest_source(source))
+            log_event(logger, "phase_end", phase="INGEST", result="ok",
+                      duration_ms=_ms(t0), run_id=ctx.run_id, request_id=ctx.request_id)
         except Exception as exc:
+            log_event(logger, "phase_end", phase="INGEST", result="error",
+                      error_type=type(exc).__name__, error_message=str(exc),
+                      duration_ms=_ms(t0), run_id=ctx.run_id, request_id=ctx.request_id)
+            metrics().inc("pipeline_runs_total", tags={"result": "failed"})
+            metrics().inc("pipeline_failures_total",
+                          tags={"phase": "INGEST", "error_type": type(exc).__name__})
+            persist_error(module="pipeline.orchestrator",
+                          error_type=type(exc).__name__, message=str(exc),
+                          context={"run_id": ctx.run_id, "phase": "INGEST"})
             raise PipelinePhaseError(
                 phase="INGEST", context=str(exc), cause=exc,
             ) from exc
 
+    t0 = time.monotonic()
+    log_event(logger, "phase_start", phase="DETECT", run_id=ctx.run_id,
+              request_id=ctx.request_id)
     try:
         detector = StoryDetector()
         result = detector.process(signal_ids=signal_ids)
+        log_event(logger, "phase_end", phase="DETECT", result="ok",
+                  duration_ms=_ms(t0), run_id=ctx.run_id, request_id=ctx.request_id)
     except Exception as exc:
+        log_event(logger, "phase_end", phase="DETECT", result="error",
+                  error_type=type(exc).__name__, error_message=str(exc),
+                  duration_ms=_ms(t0), run_id=ctx.run_id, request_id=ctx.request_id)
+        metrics().inc("pipeline_runs_total", tags={"result": "failed"})
+        metrics().inc("pipeline_failures_total",
+                      tags={"phase": "DETECT", "error_type": type(exc).__name__})
+        persist_error(module="pipeline.orchestrator",
+                      error_type=type(exc).__name__, message=str(exc),
+                      context={"run_id": ctx.run_id, "phase": "DETECT"})
         raise PipelinePhaseError(
             phase="DETECT", context=str(exc), cause=exc,
         ) from exc
@@ -255,15 +296,24 @@ def run_pipeline(
                     ))
                     continue
 
+            t0 = time.monotonic()
+            log_event(logger, "phase_start", phase="VERIFY", story_id=handle or bk,
+                      run_id=ctx.run_id, request_id=ctx.request_id)
             verification = run_verification(
                 claims_specs=specs,
                 story_id=handle,
                 reference_time=ref_iso,
             )
+            log_event(logger, "phase_end", phase="VERIFY", result="ok",
+                      duration_ms=_ms(t0), run_id=ctx.run_id,
+                      request_id=ctx.request_id)
 
             # Phase 4: Decision Gate
             decision = verification["decision"]
             if decision != "PUBLISH":
+                log_event(logger, "story_outcome", story_id=handle or bk,
+                          result=("REJECT" if decision == "REJECT" else "WAIT"),
+                          run_id=ctx.run_id, request_id=ctx.request_id)
                 outcomes.append(StoryOutcome(
                     story_handle=handle,
                     business_key=bk,
@@ -274,6 +324,9 @@ def run_pipeline(
 
             # Phase 5-8: Generate -> Publish -> Measure
             with get_session() as session:
+                t0 = time.monotonic()
+                log_event(logger, "phase_start", phase="GENERATE", story_id=handle or bk,
+                          run_id=ctx.run_id, request_id=ctx.request_id)
                 artifact = generate_story(
                     session,
                     story_id=handle,
@@ -281,12 +334,23 @@ def run_pipeline(
                     reference_time=ref_iso,
                     ai_router=ai_router,
                 )
+                log_event(logger, "phase_end", phase="GENERATE", result="ok",
+                          artifact_id=(artifact or {}).get("artifact_id"),
+                          duration_ms=_ms(t0), run_id=ctx.run_id,
+                          request_id=ctx.request_id)
 
+                t0 = time.monotonic()
+                log_event(logger, "phase_start", phase="PUBLISH", story_id=handle or bk,
+                          run_id=ctx.run_id, request_id=ctx.request_id)
                 pub = publish_story(
                     session,
                     story_id=handle,
                     destinations=destinations,
                 )
+                log_event(logger, "phase_end", phase="PUBLISH",
+                          result="published" if pub.get("published") else "not_published",
+                          duration_ms=_ms(t0), run_id=ctx.run_id,
+                          request_id=ctx.request_id)
 
                 measurement = None
                 if pub.get("published"):
@@ -326,17 +390,30 @@ def run_pipeline(
             ))
 
         except PipelinePhaseError:
+            metrics().inc("pipeline_runs_total", tags={"result": "failed"})
             raise
         except Exception as exc:
-            logger.error(
-                "Pipeline failed at story %r: %s", bk, exc, exc_info=True,
-            )
+            log_event(logger, "story_failed", story_id=bk, story_handle=handle or "unknown",
+                      error_type=type(exc).__name__, error_message=str(exc),
+                      run_id=ctx.run_id, request_id=ctx.request_id)
+            metrics().inc("pipeline_failures_total",
+                          tags={"phase": "STORY", "error_type": type(exc).__name__})
+            persist_error(module="pipeline.orchestrator",
+                          error_type=type(exc).__name__, message=str(exc),
+                          context={"run_id": ctx.run_id, "request_id": ctx.request_id,
+                                   "story_id": bk, "story_handle": handle or "unknown"})
             outcomes.append(StoryOutcome(
                 story_handle=handle or "unknown",
                 business_key=bk,
                 final_status="FAILED",
                 error=f"{type(exc).__name__}: {exc}",
             ))
+
+    metrics().inc("pipeline_runs_total", tags={"result": "ok"})
+    log_event(logger, "pipeline_end", result="ok",
+              stories_detected=len(result.stories), stories_processed=len(outcomes),
+              duration_ms=_ms(ctx.started_at), run_id=ctx.run_id,
+              request_id=ctx.request_id)
 
     return {
         "status": "ok",
