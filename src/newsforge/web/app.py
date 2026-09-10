@@ -181,5 +181,8 @@ def create_app() -> FastAPI:
             return {"status": "ok", "db": "connected"}
         except Exception as e:
             return {"status": "error", "db": str(e)}
-    
+
     return app
+
+
+app = create_app()
