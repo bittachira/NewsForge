@@ -65,7 +65,7 @@ jobs:
           docker run --rm \
             -e NEWSFORGE_DB_PATH=/tmp/smoke-data/newsforge.db \
             -e NEWSFORGE_MOCK_AI=true \
-            "${{ env.DOCKER_IMAGE }}:${DOCKER_TAG}" << 'EOF'
+            "${{ env.DOCKER_IMAGE }}:${DOCKER_TAG}}" << 'EOF'
 import subprocess
 import sys
 
@@ -103,7 +103,7 @@ EOF
           docker run --rm \
             -v /tmp/pytest-cache:/tmp/.pytest_cache \
             -e PYTHONDONTWRITEBYTECODE=1 \
-            "${{ env.DOCKER_IMAGE }}:${DOCKER_TAG}" python -m pytest tests/test_p4_generation.py tests/test_p5_publish_seo.py tests/test_p6_analytics.py -v --tb=short || exit 1
+            "${{ env.DOCKER_IMAGE }}:${DOCKER_TAG}}" python -m pytest tests/test_p4_generation.py tests/test_p5_publish_seo.py tests/test_p6_analytics.py -v --tb=short || exit 1
         
       - name: Run regression tests locally (no Docker)
         run: |
