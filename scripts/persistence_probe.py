@@ -8,6 +8,8 @@ engine/factory exactly like the production startup path (init_db -> get_session)
 """
 import sys
 
+from sqlalchemy import select
+
 from newsforge.db import stories
 from newsforge.db.session import get_session_factory, init_db
 
@@ -16,18 +18,16 @@ PROBE_SLUG = "ci-persistence-probe"
 
 def _count_probe_rows() -> int:
     with get_session_factory()() as session:
-        count = session.execute(
-            stories.select().where(stories.c.slug == PROBE_SLUG)
-        ).scalar()
-    return count or 0
+        rows = session.scalars(
+            select(stories).where(stories.slug == PROBE_SLUG)
+        ).all()
+    return len(rows)
 
 
 def write() -> None:
     init_db()
     with get_session_factory()() as session:
-        session.execute(
-            stories.insert().values(slug=PROBE_SLUG, title="Persistence probe")
-        )
+        session.add(stories(slug=PROBE_SLUG, title="Persistence probe"))
         session.commit()
 
 
