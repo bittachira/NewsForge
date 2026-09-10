@@ -23,34 +23,37 @@ from sqlalchemy import text
 # Test DB path absolute logic directly
 def test_db_path_absolute_creates_directory():
     """Verify that absolute database paths create parent directories.
-    
+
     This tests the fix for: https://github.com/bittachira/NewsForge/issues/XXX
     The issue was that build_engine() didn't create /data/ directory for
     absolute paths like /data/newsforge.db, causing startup failures.
+
+    Uses a writable temp absolute path so the assertion holds on any runner:
+    the container image creates /data at build time (root), but the hosted
+    runner user cannot write system-level paths like /data.
     """
+    import shutil
     from newsforge.db.session import build_engine, DatabaseConfig
-    
-    # Test with absolute path /data/newsforge.db
-    config = DatabaseConfig(path="/data/test_newsforge.db")
-    engine = build_engine(config)
-    
-    # The directory should exist after building the engine
-    db_path = Path("/data/test_newsforge.db")
-    assert db_path.parent.exists(), f"Parent directory {db_path.parent} should be created for absolute path"
-    
-    # Test that we can actually create a table in this database
-    from newsforge.db.base import Base
-    Base.metadata.create_all(bind=engine)
-    
-    # Verify the DB file was created
-    assert db_path.exists(), f"Database file {db_path} should exist after creating tables"
-    
-    # Cleanup
-    engine.dispose()
-    if db_path.exists():
-        db_path.unlink()
-    if db_path.parent.exists() and not any(db_path.parent.iterdir()):
-        db_path.parent.rmdir()
+
+    base = Path(tempfile.mkdtemp(prefix="nf_absdb_"))
+    try:
+        # Absolute path whose parent does not exist yet — must be auto-created.
+        db_path = base / "nested" / "not_yet_created" / "test_newsforge.db"
+        engine = build_engine(DatabaseConfig(path=db_path))
+
+        assert db_path.parent.exists(), (
+            f"Parent directory {db_path.parent} should be created for absolute path")
+
+        # Test that we can actually create a table in this database
+        from newsforge.db.base import Base
+        Base.metadata.create_all(bind=engine)
+
+        # Verify the DB file was created
+        assert db_path.exists(), f"Database file {db_path} should exist after creating tables"
+
+        engine.dispose()
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
 
 
 def test_health_endpoint_sqlalchemy_2x():

@@ -53,7 +53,11 @@ def build_engine(config: DatabaseConfig | None = None) -> create_engine:
     posix = str(abs_path).replace(os.sep, "/")
     if posix.startswith("/"):
         posix = posix[1:]  # SQLAlchemy canonical absolute URL is sqlite:////<path> (no leading slash)
-    url = f"sqlite:////{posix}" if abs_path.is_absolute() else f"sqlite:///{posix}"
+    # A Windows drive-letter absolute path (C:/...) must use the 3-slash form:
+    # sqlite3 rejects sqlite:////C:/... on Windows (it resolves the leading "/"
+    # against the cwd drive). POSIX absolute paths use the 4-slash form.
+    drive_letter = len(posix) >= 2 and posix[1] == ":"
+    url = f"sqlite:////{posix}" if abs_path.is_absolute() and not drive_letter else f"sqlite:///{posix}"
     return create_engine(url, **kwargs)
 
 
