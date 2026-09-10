@@ -30,6 +30,10 @@ htmlcov/
 .pytest_tmp/
 .ruff_cache/
 
+# Deployment infrastructure
+.env
+.env.template
+
 # OS / editor
 .DS_Store
 Thumbs.db

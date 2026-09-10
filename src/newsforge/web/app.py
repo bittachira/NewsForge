@@ -7,10 +7,12 @@ bodies come from the persisted GeneratedArtifact when one exists; otherwise the 
 story summary is shown (no new facts).
 
 Routes:
+  GET /health            -> Health check for deployment readiness
   GET /articles          -> SSR list of published articles
   GET /articles/{slug}   -> SSR article page with JSON-LD, canonical, OG, Twitter cards
   GET /sitemap.xml       -> sitemap of published article URLs
   GET /feed.xml          -> RSS 2.0 feed of published articles
+  GET /analytics          -> BI dashboard
 """
 from __future__ import annotations
 
@@ -168,4 +170,15 @@ def create_app() -> FastAPI:
         xml_text = render_rss_xml(site_name=brand.name, site_url=brand.site_url, entries=entries)
         return Response(content=xml_text, media_type="application/xml")
 
+    @app.get("/health", response_model=dict)
+    def health_check():
+        """Simple health check endpoint for deployment readiness."""
+        try:
+            with get_session() as s:
+                # Test DB connection
+                s.execute("SELECT 1")
+            return {"status": "ok", "db": "connected"}
+        except Exception as e:
+            return {"status": "error", "db": str(e)}
+    
     return app
