@@ -89,10 +89,10 @@ echo ""
 # Health check
 echo "[6/8] Running health check..."
 HEALTH_RESPONSE=$(curl -s http://localhost:${PORT}/health)
-HEALTH_STATUS=$(echo $HEALTH_RESPONSE | grep -o '"status": "[^"]*"' | cut -d'"' -f4)
+HEALTH_STATUS=$(echo $HEALTH_RESPONSE | grep -o '"status":"[^"]*"' | cut -d'"' -f4)
 echo "Health response: $HEALTH_RESPONSE"
 
-if echo "$HEALTH_RESPONSE" | grep -q '"status": "ok"'; then
+if echo "$HEALTH_RESPONSE" | grep -q '"status":"ok"'; then
     echo "Staging health check PASSED ✓"
 else
     echo "WARNING: Health check returned unexpected status"
@@ -104,16 +104,19 @@ echo "[7/8] Verifying endpoints..."
 
 ARTICLES_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:${PORT}/articles)
 SITEMAP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:${PORT}/sitemap.xml)
-RSS_STATUS=$(curl -s -o /dev/null -w "%%{http_code}" http://localhost:${PORT}/feed.xml)
-ANALYTICS_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:${PORT}/analytics)
+RSS_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:${PORT}/feed.xml)
+ANALYTICS_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -H "X-Admin-Token: ${NEWSFORGE_ADMIN_TOKEN}" http://localhost:${PORT}/analytics)
+ANALYTICS_DENIED=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:${PORT}/analytics)
 
 echo "  GET /articles: $ARTICLES_STATUS"
 echo "  GET /sitemap.xml: $SITEMAP_STATUS"  
 echo "  GET /feed.xml: $RSS_STATUS"
-echo "  GET /analytics: $ANALYTICS_STATUS"
+echo "  GET /analytics (with admin token): $ANALYTICS_STATUS"
+echo "  GET /analytics (anonymous): $ANALYTICS_DENIED (expected 403)"
 
 if [ "$ARTICLES_STATUS" = "200" ] && [ "$SITEMAP_STATUS" = "200" ] && \
-   [ "$RSS_STATUS" = "200" ] && [ "$ANALYTICS_STATUS" = "200" ]; then
+   [ "$RSS_STATUS" = "200" ] && [ "$ANALYTICS_STATUS" = "200" ] && \
+   [ "$ANALYTICS_DENIED" = "403" ]; then
     echo "All endpoints responding correctly ✓"
 else
     echo "WARNING: Some endpoints returned unexpected status codes"

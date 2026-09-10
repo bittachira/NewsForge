@@ -7,26 +7,33 @@ bodies come from the persisted GeneratedArtifact when one exists; otherwise the 
 story summary is shown (no new facts).
 
 Routes:
-  GET /health            -> Health check for deployment readiness
+  GET /health            -> minimal public health probe (HTTP 503 on unhealthy, no details)
   GET /articles          -> SSR list of published articles
   GET /articles/{slug}   -> SSR article page with JSON-LD, canonical, OG, Twitter cards
   GET /sitemap.xml       -> sitemap of published article URLs
   GET /feed.xml          -> RSS 2.0 feed of published articles
-  GET /analytics          -> BI dashboard
+  GET /analytics         -> INTERNAL BI dashboard (requires NEWSFORGE_ADMIN_TOKEN)
+
+Security (OPS hardening): FastAPI auto-docs (/docs, /redoc, /openapi.json) are disabled;
+the analytics/BI route is gated by an admin token and fails closed; /health never echoes
+exception text (fixed literals only, correct 503 on failure).
 """
 from __future__ import annotations
 
+import hmac
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 from sqlalchemy import text
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.templating import Jinja2Templates
 
 from newsforge.analytics import content_roi_query, total_ai_cost
 from newsforge.config import BrandConfig
+from newsforge.core.logger import get_logger
 from newsforge.db import get_session, init_db, generated_artifacts, publications, stories
 from newsforge.db.models import PublicationStatus, from_jsonable
 from newsforge.seo.feeds import render_rss_xml, render_sitemap_xml
@@ -38,7 +45,25 @@ from newsforge.seo.meta import (
     twitter_card_tags,
 )
 
+logger = get_logger("web.app")
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
+
+# Single env source of truth for the internal BI gate (see _internal_allowed).
+_ADMIN_TOKEN_ENV = "NEWSFORGE_ADMIN_TOKEN"
+
+
+def _internal_allowed(request: Request) -> bool:
+    """Fail-closed gate for internal/BI endpoints (no full RBAC in the MVP).
+
+    A single admin token (env ``NEWSFORGE_ADMIN_TOKEN``) must be provided via the
+    ``X-Admin-Token`` header or ``?token=`` query param. When the token is not
+    configured the endpoint stays closed. Compared in constant time; the token is never
+    echoed into responses or logs."""
+    token = os.getenv(_ADMIN_TOKEN_ENV)
+    if not token:
+        return False
+    provided = request.headers.get("X-Admin-Token") or request.query_params.get("token") or ""
+    return isinstance(provided, str) and hmac.compare_digest(provided, token)
 
 
 def _published_entries(session) -> list[dict]:
@@ -126,7 +151,8 @@ def create_app() -> FastAPI:
         init_db()
         yield
 
-    app = FastAPI(title="NewsForge Web", lifespan=_lifespan)
+    app = FastAPI(title="NewsForge Web", lifespan=_lifespan,
+                  docs_url=None, redoc_url=None, openapi_url=None)
     templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
     brand = BrandConfig()
 
@@ -148,10 +174,12 @@ def create_app() -> FastAPI:
 
     @app.get("/analytics", response_class=HTMLResponse)
     def analytics_dashboard(request: Request):
-        """SSR analytics dashboard: traffic / revenue / cost / ROI per (entity,currency).
+        """INTERNAL SSR analytics dashboard: traffic / revenue / cost / ROI.
 
-        Pure read over persisted state (P6): BI queries only; no JS, no writes.
-        Totals are computed for USD (the cost currency)."""
+        BI reads only (P6); requires NEWSFORGE_ADMIN_TOKEN (fail closed). Totals are
+        computed for USD (the cost currency)."""
+        if not _internal_allowed(request):
+            raise HTTPException(status_code=403, detail="forbidden")
         with get_session() as s:
             rows = content_roi_query(s)
             total_cost = total_ai_cost(s)
@@ -180,14 +208,21 @@ def create_app() -> FastAPI:
 
     @app.get("/health", response_model=dict)
     def health_check():
-        """Simple health check endpoint for deployment readiness."""
+        """Minimal public health probe.
+
+        Returns fixed literals only; a connectivity failure is reported as HTTP 503 with
+        a generic body — the underlying exception text is NEVER exposed (§ health)."""
         try:
             with get_session() as s:
                 # Test DB connection (SQLAlchemy 2.x)
                 s.execute(text("SELECT 1"))
-            return {"status": "ok", "db": "connected"}
-        except Exception as e:
-            return {"status": "error", "db": str(e)}
+        except Exception:  # noqa: BLE001 - connectivity errors are surfaced, not leaked
+            logger.warning("health check reported unhealthy")
+            return JSONResponse(
+                status_code=503,
+                content={"status": "unhealthy", "db": "disconnected"},
+            )
+        return {"status": "ok", "db": "connected"}
 
     return app
 

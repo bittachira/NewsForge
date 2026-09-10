@@ -143,7 +143,7 @@ class AiRouter:
             resp = httpx.post(
                 url, json=body, headers=headers, timeout=self.config.request_timeout_s
             )
-        except Exception as exc:  # noqa: BLE001 - timeout / DNS / connection errors
+        except (httpx.HTTPError, OSError, ValueError, TimeoutError) as exc:  # transport/DNS/bad-URL
             raise ProviderError(
                 f"provider request failed: {type(exc).__name__}: {_redact(key, exc)}"
             ) from exc

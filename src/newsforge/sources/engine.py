@@ -22,6 +22,7 @@ from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 from datetime import datetime, timezone
 
 from newsforge.core.logger import get_logger
+from newsforge.core.netguard import SSRFError, assert_public_target
 from newsforge.db.session import get_session
 from newsforge.db.models import SourceType, SourceTier, source_items
 from newsforge.sources.trust import item_confidence
@@ -31,6 +32,13 @@ logger = get_logger("sources.engine")
 DEFAULT_TIMEOUT = 15.0
 MAX_RETRIES = 4
 BACKOFF_BASE = 0.5
+
+_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+MAX_REDIRECTS = 5
+_FETCH_HEADERS = {
+    "User-Agent": "NewsForge/0.1 (+research bot)",
+    "Accept": "application/rss+xml, application/json, text/html,*/*",
+}
 
 
 @dataclass
@@ -66,25 +74,48 @@ def _first_link(soup, predicate=None):
 
 
 # --------------------------------------------------------------------------- #
-# Fetching with retry + backoff (§37 resilience)
+# Fetching with retry + backoff, SSRF-guarded on every hop (§37 resilience, OPS)
 # --------------------------------------------------------------------------- #
 async def fetch_url(url: str, *, timeout: float = DEFAULT_TIMEOUT, max_retries: int = MAX_RETRIES) -> str:
-    """Fetch a URL and return its text. Raises on persistent failure."""
+    """Fetch a URL and return its text. Raises on persistent failure.
+
+    Each hop (initial request AND every redirect) is validated against loopback /
+    private / link-local / metadata networks AFTER DNS resolution; refused targets
+    raise :class:`~newsforge.core.netguard.SSRFError` immediately (never retried).
+    Only transient transport errors (connect/timeout/DNS glitches) are retried."""
     last_err: Exception | None = None
     for attempt in range(1, max_retries + 1):
         try:
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as session:
-                async with session.get(url, headers={"User-Agent": "NewsForge/0.1 (+research bot)", "Accept": "application/rss+xml, application/json, text/html,*/*"}, allow_redirects=True) as resp:
-                    if resp.status != 200:
-                        raise RuntimeError(f"HTTP {resp.status}")
-                    raw = await resp.text(encoding="utf-8", errors="replace")
-            return raw
-        except Exception as exc:  # noqa: BLE001
+            return await _fetch_with_guard(url, timeout=timeout)
+        except SSRFError:
+            raise  # hard policy failure: retrying can never make it legal
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError) as exc:
             last_err = exc
             wait = BACKOFF_BASE * (2 ** (attempt - 1))
             logger.warning("fetch %s attempt %d failed: %s; retry in %.1fs", url, attempt, exc, wait)
             await asyncio.sleep(wait)
     raise RuntimeError(f"Failed to fetch {url}: {last_err}")
+
+
+async def _fetch_with_guard(url: str, *, timeout: float) -> str:
+    """Run the GET + manual redirect chain, re-validating each hop with the SSRF guard."""
+    from urllib.parse import urljoin
+
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as session:
+        current = str(url)
+        for _ in range(MAX_REDIRECTS + 1):
+            await assert_public_target(current)
+            async with session.get(current, headers=_FETCH_HEADERS, allow_redirects=False) as resp:
+                if resp.status in _REDIRECT_STATUSES:
+                    location = resp.headers.get("Location")
+                    if not location:
+                        raise RuntimeError(f"redirect without Location from {current}")
+                    current = str(urljoin(current, location))
+                    continue
+                if resp.status != 200:
+                    raise RuntimeError(f"HTTP {resp.status}")
+                return await resp.text(encoding="utf-8", errors="replace")
+    raise RuntimeError("too many redirects")
 
 
 # --------------------------------------------------------------------------- #
@@ -126,7 +157,7 @@ def parse_rss(raw_text: str, *, channel_title: str | None = None, channel_link: 
     items: list[dict] = []
     try:
         root = ET.fromstring(raw_text)
-    except Exception:
+    except ET.ParseError:
         return []
 
     def text_of(el, name):
@@ -246,7 +277,7 @@ def parse_content(content_type: str | None, raw_text: str) -> list[dict]:
         try:
             import json as _json  # local import to avoid top-level cost
             return parse_json_api(_json.loads(raw_text))
-        except Exception as exc:  # noqa: BLE001
+        except (ValueError, TypeError) as exc:  # JSONDecodeError is a ValueError
             logger.warning("JSON parse failed for %s: %s", raw_text, exc)
             return []
 

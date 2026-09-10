@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest.mock import patch
 
 import pytest
 
@@ -146,9 +147,24 @@ def rss_server():
     srv.shutdown()
 
 
+async def _allow_any_target(_url):
+    return None
+
+
+def _ingest_with_local_fetch(source):
+    """Run ingest_source against the loopback test server.
+
+    The SSRF guard (assert_public_target) is bypassed HERE ONLY so these tests keep
+    exercising ingest + dedup logic against a local fixture. Product-level SSRF
+    strictness (localhost/private targets blocked) is asserted in test_ops_security.
+    """
+    with patch("newsforge.sources.engine.assert_public_target", new=_allow_any_target):
+        return asyncio.run(ingest_source(source))
+
+
 def test_ingest_adds_items(rss_server):
     source = {"source_id": "local-rss", "name": "Local RSS", "url": rss_server, "type": "RSS", "tier": "TIER_2"}
-    result = asyncio.run(ingest_source(source))
+    result = _ingest_with_local_fetch(source)
     assert result.added == 2
     assert result.errors == []
     assert _count_items() == 2
@@ -156,8 +172,8 @@ def test_ingest_adds_items(rss_server):
 
 def test_ingest_dedupes_on_reingest(rss_server):
     source = {"source_id": "local-rss-2", "name": "Local RSS 2", "url": rss_server, "type": "RSS", "tier": "TIER_2"}
-    first = asyncio.run(ingest_source(source))
-    second = asyncio.run(ingest_source(source))
+    first = _ingest_with_local_fetch(source)
+    second = _ingest_with_local_fetch(source)
     assert first.added == 2 and first.skipped_dupe == 0
     # Re-ingesting identical content must be a no-op (dedup works).
     assert second.added == 0 and second.skipped_dupe == 2

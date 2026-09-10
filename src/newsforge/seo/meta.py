@@ -38,10 +38,15 @@ def build_jsonld(*, site_name: str, title: str, summary: Optional[str],
 
 
 def render_jsonld_script(jsonld: dict) -> str:
-    """Deterministic JSON-LD payload for a <script type=\"application/ld+json\"> tag.
+    """Deterministic JSON-LD payload for a <script type="application/ld+json"> tag.
 
-    Sorted keys + compact separators => identical bytes for identical input."""
-    return json.dumps(jsonld, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    Sorted keys + compact separators => identical bytes for identical input. ``</`` and
+    ``<!--`` are escaped to their JSON unicode forms so attacker-controlled text
+    (titles/summaries persisting in the DB) can never close the <script> element or open
+    an HTML comment inside it. The output remains valid JSON-LD (json.loads decodes the
+    escapes back to the original text) while staying inert in an HTML context."""
+    raw = json.dumps(jsonld, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return raw.replace("</", "\\u003c/").replace("<!--", "\\u003c!--")
 
 
 def open_graph_tags(*, site_name: str, title: str, summary: Optional[str], url: str) -> list[tuple[str, str]]:

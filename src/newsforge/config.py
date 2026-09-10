@@ -56,9 +56,9 @@ class AiConfig:
     openai_base_url: str = os.getenv("NEWSFORGE_OPENAI_BASE_URL", "https://api.openai.com/v1")
     openai_api_key: str | None = os.getenv("NEWSFORGE_OPENAI_API_KEY")
 
-    # LM Studio local server (OpenAI-compatible, no key).
+    # LM Studio local server (OpenAI-compatible, no key by default).
     lm_studio_base_url: str = os.getenv("NEWSFORGE_LM_STUDIO_URL", "http://localhost:1234/v1")
-    lm_studio_api_key: str | None = os.getenv("NEWSFORGE_LM_STUDIO_API_KEY", "lm-studio")
+    lm_studio_api_key: str | None = os.getenv("NEWSFORGE_LM_STUDIO_API_KEY")
 
     # Ollama (native /api/chat format).
     ollama_base_url: str = os.getenv("NEWSFORGE_OLLAMA_URL", "http://localhost:11434")

@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import hashlib
 
+from sqlalchemy.exc import IntegrityError
+
 from newsforge.db.models import (
     DecisionState,
     PublicationStatus,
@@ -166,7 +168,7 @@ def _idempotent_add(session, instance):
         session.add(instance)
         session.commit()
         return True
-    except Exception:  # noqa: BLE001 - UNIQUE constraint => already present, treat as no-op (§17)
+    except IntegrityError:  # UNIQUE constraint => already present, treat as no-op (§17)
         session.rollback()
         return False
 

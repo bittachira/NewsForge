@@ -61,12 +61,16 @@ NEWSFORGE_TAGLINE="Verified light on what matters."
 
 | Endpoint | Expected Status | Purpose |
 |----------|-----------------|---------|
-| `/health` | 200 OK | Service health check |
+| `/health` | 200 OK / 503 on failure | Minimal public health check |
 | `/articles` | 200 OK | List published articles |
 | `/articles/{slug}` | 200/404 | Individual article page |
 | `/sitemap.xml` | 200 OK | Sitemap for discovery |
 | `/feed.xml` | 200 OK | RSS feed |
-| `/analytics` | 200 OK | BI dashboard |
+| `/analytics` | 200 (with token) / 403 (anonymous) | INTERNAL BI dashboard; requires `NEWSFORGE_ADMIN_TOKEN` |
+
+**Security (OPS hardening)**: `/docs`, `/redoc` and `/openapi.json` are disabled (404).
+`/analytics` is fail-closed: without `NEWSFORGE_ADMIN_TOKEN` set it returns 403 for every
+caller. The container runs as a non-root user; `/data` is owned by that user.
 
 ## Database Configuration
 

@@ -15,6 +15,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     && rm -rf /var/lib/apt/lists/*
 
+# Non-root runtime user (OPS security: the web/db process must NEVER run as root).
+RUN groupadd --system --gid 10001 newsforge \
+    && useradd --system --uid 10001 --gid 10001 --no-create-home \
+        --shell /usr/sbin/nologin newsforge
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
@@ -28,8 +33,13 @@ ENV PYTHONPATH=/app/src
 RUN mkdir -p /data && \
     touch /data/.gitkeep
 
+# Allow the runtime user to read the app and WRITE /data (DB init at startup).
+RUN chown -R newsforge:newsforge /app /data
+
 # Set environment from example template (production will override with actual .env)
 COPY .env.example .env
 ENV NEWSFORGE_DB_PATH=/data/newsforge.db
+
+USER newsforge
 
 CMD ["uvicorn", "newsforge.web.app:app", "--host", "0.0.0.0", "--port", "8000"]

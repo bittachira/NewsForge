@@ -36,6 +36,7 @@ jobs:
             -p 8080:8000 \
             -e NEWSFORGE_DB_PATH=/data/newsforge.db \
             -e NEWSFORGE_MOCK_AI=true \
+            -e NEWSFORGE_ADMIN_TOKEN=ci-admin-token \
             "${IMAGE_REF}" || exit 1
           
           echo "Waiting for service to become available..."
@@ -82,6 +83,7 @@ jobs:
             -p 8090:8000 \
             -e NEWSFORGE_DB_PATH=/data/newsforge.db \
             -e NEWSFORGE_MOCK_AI=true \
+            -e NEWSFORGE_ADMIN_TOKEN=ci-admin-token \
             "${IMAGE_REF}" || exit 1
           
           echo "Waiting for smoke test service to become available..."
@@ -104,8 +106,8 @@ jobs:
           # Run smoke tests against the running container using curl directly
           echo "Testing endpoints..."
           ALL_PASSED=true
-          
-          for endpoint in /health /articles /sitemap.xml /feed.xml /analytics; do
+
+          for endpoint in /health /articles /sitemap.xml /feed.xml; do
             STATUS_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8090${endpoint} 2>/dev/null || echo "000")
             if [ "$STATUS_CODE" = "200" ]; then
               echo "✓ $endpoint: HTTP 200 OK"
@@ -114,7 +116,34 @@ jobs:
               ALL_PASSED=false
             fi
           done
-          
+
+          # Internal BI /analytics is gated: authorized request must be 200, anonymous 403.
+          AUTH_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -H "X-Admin-Token: ci-admin-token" http://localhost:8090/analytics 2>/dev/null || echo "000")
+          if [ "$AUTH_STATUS" = "200" ]; then
+            echo "✓ /analytics (authorized): HTTP 200 OK"
+          else
+            echo "✗ /analytics authorized: HTTP ${AUTH_STATUS}"
+            ALL_PASSED=false
+          fi
+          DENY_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8090/analytics 2>/dev/null || echo "000")
+          if [ "$DENY_STATUS" = "403" ]; then
+            echo "✓ /analytics (unauthorized): denied with 403"
+          else
+            echo "✗ /analytics unauthorized: HTTP ${DENY_STATUS} (expected 403)"
+            ALL_PASSED=false
+          fi
+
+          # Auto-docs are disabled: /docs, /redoc, /openapi.json must be hidden (404).
+          for endpoint in /docs /redoc /openapi.json; do
+            DOCS_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8090${endpoint} 2>/dev/null || echo "000")
+            if [ "$DOCS_STATUS" = "404" ]; then
+              echo "✓ $endpoint hidden (404)"
+            else
+              echo "✗ $endpoint exposed: HTTP ${DOCS_STATUS}"
+              ALL_PASSED=false
+            fi
+          done
+
           if [ "$ALL_PASSED" = true ]; then
             echo "SMOKE_TESTS=passed" >> $GITHUB_OUTPUT
           else
@@ -169,7 +198,39 @@ jobs:
           else
             echo "✓ No obvious secrets in recent image layers"
           fi
-        
+
+      - name: Verify container runs as non-root
+        run: |
+          echo "Checking that the web process does NOT run as root..."
+          IMAGE_REF="${{ env.DOCKER_IMAGE }}:${{ env.DOCKER_TAG }}"
+
+          IMAGE_USER=$(docker inspect "${IMAGE_REF}" --format '{{.Config.User}}')
+          echo "Configured container user: '${IMAGE_USER}'"
+          case "${IMAGE_USER}" in
+            ""|root|0|0:0)
+              echo "✗ image runs as root"
+              exit 1 ;;
+            *)
+              echo "✓ non-root user configured in image" ;;
+          esac
+
+          RUNNER_ID=$(docker run --rm --entrypoint id "${IMAGE_REF}" 2>&1)
+          echo "Runtime identity: ${RUNNER_ID}"
+          if echo "${RUNNER_ID}" | grep -qiE 'uid=0\(root\)'; then
+            echo "✗ process runs as root at runtime"
+            exit 1
+          fi
+          echo "✓ process is non-root at runtime"
+
+          # The runtime user must be able to WRITE /data (DB init at startup).
+          if docker run --rm --entrypoint sh "${IMAGE_REF}" -c \
+              'touch /data/.write-probe && rm -f /data/.write-probe && test -w /data'; then
+            echo "✓ /data is writable by the runtime user"
+          else
+            echo "✗ /data is not writable by the runtime user"
+            exit 1
+          fi
+
       - name: Cleanup
         if: always()
         run: |
