@@ -863,10 +863,10 @@ class postpublish_events(Base):
         UniqueConstraint("event_type", "story_id", "reference_time", name="uq_postpublish_events"),
     )
 # --------------------------------------------------------------------------- #
-# Generated editorial artifacts (P6) — deterministic, evidence-bound generation
+# Generated editorial artifacts (P4) — deterministic, evidence-bound generation
 # --------------------------------------------------------------------------- #
 class ArtifactFormat(str, Enum):
-    """Editorial formats a story can be generated into (P6)."""
+    """Editorial formats a story can be generated into (P4)."""
     ARTICLE = "ARTICLE"
     BRIEF = "BRIEF"
     NEWSLETTER = "NEWSLETTER"
@@ -877,7 +877,7 @@ class ArtifactFormat(str, Enum):
 
 
 class GenerationState(str, Enum):
-    """Lifecycle of a generated artifact (P6).
+    """Lifecycle of a generated artifact (P4).
 
     GENERATED -> content produced by the generator.
     VALIDATED -> structural validation passed; the row is auditable.
@@ -889,7 +889,7 @@ class GenerationState(str, Enum):
 
 
 class generated_artifacts(Base):
-    """Generated editorial artifact for one (story, format) pair (P6).
+    """Generated editorial artifact for one (story, format) pair (P4).
 
     Deterministic and idempotent: ``artifact_id`` is the SHA-256 of
     ``(story_id, format, generator_version, template_version)``, so the same logical

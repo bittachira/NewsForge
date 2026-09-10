@@ -1,4 +1,4 @@
-"""P6 — deterministic editorial generation (evidence-bound, offline).
+"""P4 — deterministic editorial generation (evidence-bound, offline).
 
 The generation layer READS editorial state (stories/claims/evidence/decisions) and writes only
 to ``generated_artifacts``. It never mutates ``decisions``, ``trust_evaluations``,

@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block head %}
+<link rel="canonical" href="{{ canonical_url }}">
+{% for prop, content in og_tags %}<meta property="{{ prop }}" content="{{ content }}">{% endfor %}
+{% for name, content in twitter_tags %}<meta name="{{ name }}" content="{{ content }}">{% endfor %}
+<script type="application/ld+json">{{ jsonld_script|safe }}</script>
+{% endblock %}
+{% block title %}{{ title }} — {{ brand }}{% endblock %}
+{% block content %}
+<article>
+  <h1>{{ title }}</h1>
+  {% if summary %}<p class="summary">{{ summary }}</p>{% endif %}
+  {% for s in sections %}
+    {% if s.type == "fact" or s.type == "bullet" or s.type == "event" or s.type == "qa" %}
+      <p class="fact">{{ s.text }}</p>
+    {% else %}
+      <p>{{ s.text }}</p>
+    {% endif %}
+  {% endfor %}
+</article>
+{% endblock %}

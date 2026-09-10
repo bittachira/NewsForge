@@ -148,6 +148,16 @@ def _finalize_publication(session, publication, *, succeeded_all: bool) -> None:
     if str(publication.status) == target:
         return
     PublicationStateMachine(publication).transition_to(target)
+    # Persist WHEN this publication actually completed: the latest confirmed SUCCEEDED
+    # attempt timestamp. Set once and never rewritten, so re-publishes keep a stable,
+    # deterministic published_at (P5 gate 3/15). No new facts are invented — the value
+    # comes straight from the recorded attempts.
+    if target == PublicationStatus.COMPLETED.value and not publication.published_at:
+        attempts = session.query(publication_attempts).filter_by(
+            publication_id=str(publication.id), status="SUCCEEDED").all()
+        stamps = [a.distributed_at for a in attempts if a.distributed_at]
+        if stamps:
+            publication.published_at = max(stamps)
     session.commit()
 
 
@@ -259,6 +269,17 @@ def publish_story(session, *, story_id: str, destinations=None) -> dict:
 
     key_succeeded = _distribute(session, publications, decision_row)
     succeeded_all = bool(key_succeeded) and all(key_succeeded.values())
+
+    if succeeded_all:
+        # Persist the publish-time editorial snapshot (P5, §27). The measurement layer is a
+        # pure observer: it only READS editorial state and writes published_snapshots. It is
+        # idempotent by (story_id, reference_time), so re-publishing at the same
+        # published_at never duplicates the snapshot row.
+        from newsforge.measurement import capture_snapshot
+
+        stamps = [p.published_at for p in publications.values() if p.published_at]
+        ref = max(stamps) if stamps else None
+        capture_snapshot(session, story_id=str(story_id), reference_time=ref, published_at=ref)
 
     return {
         "story_id": story_id,

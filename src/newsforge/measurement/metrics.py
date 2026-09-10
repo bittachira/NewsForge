@@ -223,15 +223,19 @@ def _to_snapshot_dict(row) -> dict:
         "slug": row.slug,
         "status": str(row.status),
         "trust_score": int(row.trust_score or 0),
+        "published_at": row.published_at,
     }
 
 
-def capture_snapshot(session, *, story_id: str, reference_time: Optional[str] = None) -> dict:
+def capture_snapshot(session, *, story_id: str, reference_time: Optional[str] = None,
+                    published_at: Optional[str] = None) -> dict:
     """Capture (idempotently) a snapshot of a published story's editorial state.
 
     Keyed by ``(story_id, reference_time)`` so re-capturing at the same clock is a no-op. Reads the
     CURRENT editorial fields; callers that want publish-time fidelity must measure BEFORE editing
-    the story (the measurement layer captures on first observation). Never mutates editorial rows."""
+    the story (the measurement layer captures on first observation). ``published_at``, when given,
+    records WHEN the publication completed (persisted as-is — never recomputed). Never mutates
+    editorial rows."""
     effective = _fmt_ts(reference_time) if reference_time is not None else ""
     existing = (
         session.query(published_snapshots)
@@ -253,6 +257,7 @@ def capture_snapshot(session, *, story_id: str, reference_time: Optional[str] = 
         slug=fields["slug"],
         status=fields["status"],
         trust_score=fields["trust_score"],
+        published_at=_fmt_ts(published_at) if published_at is not None else None,
     )
     _idempotent_upsert(session, published_snapshots, **{**_column_values(row, published_snapshots), "reference_time": effective})
     return {"story_id": str(story_id), "reference_time": effective, "found": True, "snapshot": _to_snapshot_dict(row)}

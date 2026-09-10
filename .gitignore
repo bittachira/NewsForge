@@ -16,6 +16,8 @@ secrets.json
 *.key
 
 # Data / local artifacts
+# Global *.db so any runtime database (e.g. test fixtures) is never tracked.
+*.db
 data/*.db
 data/*.sqlite3
 *.log

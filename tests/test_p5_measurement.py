@@ -51,12 +51,18 @@ def isolated_db():
     db_dir = Path.cwd() / ".pytest_tmp"
     db_dir.mkdir(exist_ok=True)
     _db_seq += 1
-    path = db_dir / f"{Path(__name__).stem}_{_db_seq}.db"
-    # Guarantee a fresh DB per test: remove any stale file so create_all starts empty.
-    # Safe here -- the previous test's isolated context already disposed its engine on exit,
-    # so nothing holds a lock on this file yet. This makes re-runs independent of .pytest_tmp state.
-    if path.exists():
-        path.unlink()
+    # Module-unique namespace: __name__ is dotted (tests.test_p5_measurement), so
+    # Path(__name__).stem would be "tests" and collide with other modules sharing that
+    # stem. Use the final component, and never reuse a stale file (unlink; bump the
+    # sequence if it is locked) so runs are independent of .pytest_tmp state and order.
+    module = __name__.rsplit(".", 1)[-1]
+    path = db_dir / f"{module}_{_db_seq}.db"
+    try:
+        if path.exists():
+            path.unlink()
+    except OSError:
+        _db_seq += 1
+        path = db_dir / f"{module}_{_db_seq}.db"
     with use_isolated_database_ctx(path):
         yield
 

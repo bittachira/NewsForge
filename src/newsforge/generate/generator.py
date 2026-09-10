@@ -1,4 +1,4 @@
-"""P6 — content generation engine (local + offline).
+"""P4 — content generation engine (local + offline).
 
 The generator emits ONLY facts backed by the supplied claims/evidence. Claims without
 sufficient evidence are never stated as facts: they are excluded from the body and
@@ -11,8 +11,8 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 
-GENERATOR_VERSION = "p6.v1"
-TEMPLATE_VERSION = "p6.v1"
+GENERATOR_VERSION = "p4.v1"
+TEMPLATE_VERSION = "p4.v1"
 MODEL_NAME = "deterministic-template"
 
 

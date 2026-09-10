@@ -53,7 +53,18 @@ def isolated_db():
     db_dir = Path.cwd() / ".pytest_tmp"
     db_dir.mkdir(exist_ok=True)
     _db_seq += 1
-    path = db_dir / f"{Path(__name__).stem}_{_db_seq}.db"
+    # Module-unique namespace: __name__ is dotted (tests.test_publisher), so
+    # Path(__name__).stem would be "tests" and collide with other modules sharing that
+    # stem. Use the final component, and never reuse a stale file (unlink; bump the
+    # sequence if it is locked) so runs are independent of .pytest_tmp state and order.
+    module = __name__.rsplit(".", 1)[-1]
+    path = db_dir / f"{module}_{_db_seq}.db"
+    try:
+        if path.exists():
+            path.unlink()
+    except OSError:
+        _db_seq += 1
+        path = db_dir / f"{module}_{_db_seq}.db"
     with use_isolated_database_ctx(path):
         yield
     # Best-effort cleanup. The isolation context already disposed its engine before we get here,

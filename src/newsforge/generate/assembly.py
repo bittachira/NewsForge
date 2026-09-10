@@ -1,4 +1,4 @@
-"""P6 — artifact assembly, generation orchestration, validation and provenance.
+"""P4 — artifact assembly, generation orchestration, validation and provenance.
 
 ``assemble_editorial_artifact`` is a pure function (no I/O): it turns a story dict plus the
 supplied claim dicts into a :class:`GeneratedContent` for one format. ``generate_story`` is
@@ -29,6 +29,7 @@ from newsforge.db.models import (
     from_jsonable,
     to_jsonable,
 )
+from newsforge.ai.router import AiRouter, record_generation_job
 from newsforge.verify.persist import is_auto_publishable
 
 from .generator import (
@@ -216,6 +217,25 @@ def _has_evidence(session, claim_row) -> bool:
     return session.query(claim_evidence).filter_by(claim_id=str(claim_row.id)).count() > 0
 
 
+def _ai_input_text(story: dict, claims_payload: list, fmt: str) -> str:
+    """Deterministic AI input built ONLY from the story and its claim payload (§15).
+
+    Same (story, claims, format) always yields the same string — it is what gets hashed
+    into ``ai_runs.prompt_hash`` and counted for token/cost."""
+    parts = [str(story.get("story_id") or ""), fmt, str(story.get("title") or "")]
+    for c in claims_payload:
+        parts.append(f"{c['claim_id']}::{c['text']}")
+    return "\n".join(parts)
+
+
+def _ai_output_text(content) -> str:
+    """Deterministic AI output text (title + summary + section texts) for token counting."""
+    sections = (content.body_json or {}).get("sections") or []
+    parts = [str(content.title or ""), str(content.summary or "")]
+    parts.extend(str(s.get("text", "")) for s in sections)
+    return "\n".join(parts)
+
+
 # --------------------------------------------------------------------------- #
 # Validation (structured + auditable)
 # --------------------------------------------------------------------------- #
@@ -229,7 +249,7 @@ def validate_generated_artifact(session, artifact, *, persist: bool = False) -> 
     ``publishable`` and ``validation_json`` are updated on the row.
 
     Publication rule: ``publishable = valid AND decision_row exists AND is_auto_publishable`` —
-    the publisher's gate stays authoritative; P6 never re-derives or overrides it."""
+    the publisher's gate stays authoritative; P4 never re-derives or overrides it."""
     fmt = str(artifact.format)
     checks: dict = {}
 
@@ -410,13 +430,19 @@ def reconstruct_generation_provenance(session, *, artifact=None, artifact_id: Op
 # Orchestration: generate + validate + persist (single commit)
 # --------------------------------------------------------------------------- #
 def generate_story(session, *, story_id: str, format: str = ArtifactFormat.ARTICLE.value,
-                   generator=None, reference_time: Optional[str] = None) -> dict:
+                   generator=None, reference_time: Optional[str] = None,
+                   ai_router: Optional[AiRouter] = None) -> dict:
     """Generate + persist ONE artifact for (story, format).
 
     1. READS story/claims/evidence/decision (never mutates them).
     2. Runs the generator (may raise -> nothing has been written yet, so no partial state).
     3. Validates structurally against the real tables.
-    4. Persists idempotently by ``artifact_id`` with a SINGLE commit at the end.
+    4. Records the AI job via the router: deterministic input/output -> tokens/cost,
+       ONE ``ai_jobs`` row per logical generation (idempotent by run_id == artifact_id).
+    5. Persists idempotently by ``artifact_id`` with a SINGLE commit at the end.
+
+    When ``ai_router`` is None, the default :class:`AiRouter` is used — MOCK mode per
+    :class:`newsforge.config.AiConfig` (offline, deterministic).
 
     ``publishable`` is derived only: valid AND persisted decision exists AND
     :func:`is_auto_publishable` — it never replaces the publisher's gate (§11)."""
@@ -434,9 +460,11 @@ def generate_story(session, *, story_id: str, format: str = ArtifactFormat.ARTIC
                     .filter_by(target_type="STORY", target_id=str(story_id)).first())
 
     # 1. Generate (may raise -> no writes have happened yet, so no partial state).
+    story_dict = _story_dict(story_row)
+    claims_payload = _load_claims_payload(session, str(story_id))
     content = gen.generate(
-        story=_story_dict(story_row),
-        claims=_load_claims_payload(session, str(story_id)),
+        story=story_dict,
+        claims=claims_payload,
         format=fmt,
         reference_time=effective_time,
     )
@@ -469,7 +497,19 @@ def generate_story(session, *, story_id: str, format: str = ArtifactFormat.ARTIC
     validation["publishable"] = publishable
     state = GenerationState.VALIDATED.value if validation["valid"] else GenerationState.INVALID.value
 
-    # 4. Idempotent persistence: single commit only after everything succeeded.
+    # 4. AI cost engine (§30): deterministic input/output -> tokens/cost. Adds ONE
+    # ai_jobs + ai_runs row per logical generation (idempotent by run_id == artifact_id);
+    # rows only — the single commit below covers artifact + job atomically.
+    router = ai_router if ai_router is not None else AiRouter()
+    ai_job = record_generation_job(
+        session,
+        router=router,
+        artifact_id=artifact_id,
+        input_text=_ai_input_text(story_dict, claims_payload, fmt),
+        output_text=_ai_output_text(content),
+    )
+
+    # 5. Idempotent persistence: single commit only after everything succeeded.
     existing = session.query(generated_artifacts).filter_by(artifact_id=artifact_id).first()
     created = existing is None
     row = existing or provisional
@@ -501,4 +541,5 @@ def generate_story(session, *, story_id: str, format: str = ArtifactFormat.ARTIC
         "publishable": publishable,
         "created": created,
         "validation": validation,
+        "ai_job": ai_job,
     }

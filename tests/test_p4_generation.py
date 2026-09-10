@@ -1,4 +1,4 @@
-"""P6 — deterministic editorial generation tests (evidence-bound, offline).
+"""P4 — deterministic editorial generation tests (evidence-bound, offline).
 
 Every test runs against a throwaway SQLite database (isolated per test) with its own session. No
 row leaks between tests and no `.db` file is reused (§15 isolation). The generator is fully local:
@@ -6,7 +6,7 @@ no network, no LLM provider, no credentials (§15 determinism). Generation only 
 state and writes to ``generated_artifacts``; it never publishes, never mutates
 decisions/trust/quality/articles/stories, and a failing generator leaves no partial write (§11).
 
-Run: python -m pytest tests/test_p6_generation.py -q
+Run: python -m pytest tests/test_p4_generation.py -q
 """
 from __future__ import annotations
 
@@ -15,7 +15,11 @@ from pathlib import Path
 
 import pytest
 
+from newsforge.ai import AiRouter
+from newsforge.config import AiConfig
 from newsforge.db import (
+    ai_jobs,
+    ai_runs,
     claim_evidence,
     claims,
     decisions,
@@ -57,7 +61,7 @@ T2 = "2027-01-01T00:00:00+00:00"         # a second, distinct injected clock
 def isolated_db():
     """Give every test its own throwaway database so no row can leak between tests.
 
-    Files are named ``p6_{seq}.db`` — module-unique, never colliding with other test
+    Files are named ``p4_{seq}.db`` — module-unique, never colliding with other test
     modules' ``tests_{seq}.db`` names (all of them share that stem under
     ``tests/__init__.py``). A stale file that cannot be removed (locked) is never reused:
     the sequence is bumped and a fresh name is picked instead.
@@ -70,13 +74,13 @@ def isolated_db():
     # cross-module SQLite file contamination.
     shutil.rmtree(db_dir, ignore_errors=True)
     db_dir.mkdir(exist_ok=True)
-    path = db_dir / f"p6_{_db_seq}.db"
+    path = db_dir / f"p4_{_db_seq}.db"
     try:
         if path.exists():
             path.unlink()
     except OSError:
         _db_seq += 1
-        path = db_dir / f"p6_{_db_seq}.db"
+        path = db_dir / f"p4_{_db_seq}.db"
     with use_isolated_database_ctx(path):
         yield
     # Best-effort cleanup: the isolation context already disposed its engine, so the file
@@ -284,7 +288,7 @@ def test_generator_version_changes_artifact():
     with get_session() as s:
         gen_v2 = generate_story(
             s, story_id="story-1", format=ArtifactFormat.ARTICLE.value, reference_time=T,
-            generator=DeterministicGenerator(version="p6.v2"),
+            generator=DeterministicGenerator(version="p4.v2"),
         )
 
     assert gen_v1["artifact_id"] != gen_v2["artifact_id"]
@@ -292,7 +296,7 @@ def test_generator_version_changes_artifact():
         r1 = s.query(generated_artifacts).filter_by(artifact_id=gen_v1["artifact_id"]).one()
         r2 = s.query(generated_artifacts).filter_by(artifact_id=gen_v2["artifact_id"]).one()
         assert r1.generator_version == GENERATOR_VERSION
-        assert r2.generator_version == "p6.v2"
+        assert r2.generator_version == "p4.v2"
 
 
 # --------------------------------------------------------------------------- #
@@ -309,7 +313,7 @@ def test_template_version_changes_artifact():
     with get_session() as s:
         gen_t2 = generate_story(
             s, story_id="story-1", format=ArtifactFormat.ARTICLE.value, reference_time=T,
-            generator=DeterministicGenerator(template_version="p6.tpl2"),
+            generator=DeterministicGenerator(template_version="p4.tpl2"),
         )
 
     assert gen_t1["artifact_id"] != gen_t2["artifact_id"]
@@ -317,7 +321,7 @@ def test_template_version_changes_artifact():
         r1 = s.query(generated_artifacts).filter_by(artifact_id=gen_t1["artifact_id"]).one()
         r2 = s.query(generated_artifacts).filter_by(artifact_id=gen_t2["artifact_id"]).one()
         assert r1.template_version == TEMPLATE_VERSION
-        assert r2.template_version == "p6.tpl2"
+        assert r2.template_version == "p4.tpl2"
 
 
 # --------------------------------------------------------------------------- #
@@ -445,7 +449,7 @@ def test_reject_decision_cannot_publish():
 
 
 # --------------------------------------------------------------------------- #
-# 12. generation never publishes directly (no P4/P5 rows are created by P6)
+# 12. generation never publishes directly (no P4/P5 rows are created by P4)
 # --------------------------------------------------------------------------- #
 def test_generation_never_publishes_directly():
     with get_session() as s:
@@ -631,6 +635,131 @@ def test_invalid_artifact_is_explicitly_not_publishable():
 # --------------------------------------------------------------------------- #
 # 20. full P2->P5 regression flow: verify -> generate -> publish -> measure -> snapshot
 # --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+# AI Router + cost engine (§30-§32): MOCK routing, tokens, cost, AiJob persistence
+# --------------------------------------------------------------------------- #
+def _cost_router():
+    """MOCK router with the P4 test rate: 0.002 USD per 1k tokens."""
+    return AiRouter(config=AiConfig(mock=True, mock_cost_per_1k_tokens=0.002))
+
+
+def test_router_mock_deterministic_routing():
+    router = _cost_router()
+    r1 = router.route("GENERATE")
+    r2 = router.route("GENERATE")
+    assert r1 == r2  # deterministic routing for fixed config
+    assert r1.mock is True
+    assert r1.provider == "mock"
+    assert r1.model == "deterministic-template"
+    # Token estimation: pure function of the text (~4 chars/token), no randomness.
+    # "a b c d e f g h i j" is 19 chars -> 19 // 4 = 4 tokens
+    assert router.estimate_tokens("a b c d e f g h i j") == 4
+    assert router.estimate_tokens("a b c d e f g h i j") == router.estimate_tokens("a b c d e f g h i j")
+    assert router.estimate_tokens("") == 0
+
+
+def test_cost_calculation_deterministic():
+    router = _cost_router()
+    # (1000 + 500) / 1000 * 0.002 = 0.003 — identical on every call.
+    c1 = router.compute_cost(1000, 500)
+    c2 = router.compute_cost(1000, 500)
+    assert c1 == c2 == 0.003
+
+
+def test_ai_job_created_with_real_generation():
+    with get_session() as s:
+        _seed_story_with_claims(s, claim_specs=[
+            {"claim_id": "c-cost", "text": "The tax is three euros.", "source_id": "src-cost"},
+        ])
+
+    with get_session() as s:
+        gen = generate_story(
+            s, story_id="story-1", format=ArtifactFormat.ARTICLE.value,
+            reference_time=T, ai_router=_cost_router(),
+        )
+
+    job = gen["ai_job"]
+    assert job["created"] is True
+    assert job["run_id"] == gen["artifact_id"]
+    assert job["provider"] == "mock"
+    assert job["model"] == "deterministic-template"
+    assert job["tokens_input"] > 0 and job["tokens_output"] > 0
+    assert job["cost_usd"] > 0  # cost actually recorded, not just a field
+
+    with get_session() as s:
+        row = s.query(ai_jobs).filter_by(id=job["job_id"]).one()
+        assert row.task_type == "GENERATE"
+        assert row.model_provider == "mock"
+        assert row.cost_usd == job["cost_usd"] > 0
+        run = s.query(ai_runs).filter_by(run_id=gen["artifact_id"]).one()
+        assert run.job_id == str(row.id)
+
+
+def test_ai_job_idempotent_no_double_counting():
+    with get_session() as s:
+        _seed_story_with_claims(s, claim_specs=[
+            {"claim_id": "c-idem2", "text": "The tax is three euros.", "source_id": "src-cost2"},
+        ])
+
+    router = _cost_router()
+    gens = []
+    for _ in range(2):
+        with get_session() as s:
+            gens.append(generate_story(s, story_id="story-1", format=ArtifactFormat.ARTICLE.value,
+                                       reference_time=T, ai_router=router))
+
+    assert gens[0]["artifact_id"] == gens[1]["artifact_id"]
+    assert gens[0]["ai_job"]["created"] is True and gens[1]["ai_job"]["created"] is False
+    assert gens[0]["ai_job"]["job_id"] == gens[1]["ai_job"]["job_id"]
+
+    with get_session() as s:
+        jobs = s.query(ai_jobs).all()
+        runs = s.query(ai_runs).all()
+        assert len(jobs) == 1 and len(runs) == 1  # exactly ONE job for the logical run
+        assert runs[0].run_id == gens[0]["artifact_id"]
+
+
+def test_artifact_job_linkage_and_default_router():
+    # ai_router=None -> the default MOCK router is actually used and a job row exists.
+    with get_session() as s:
+        _seed_story_with_claims(s, claim_specs=[
+            {"claim_id": "c-link", "text": "The tax is three euros.", "source_id": "src-link"},
+        ])
+
+    with get_session() as s:
+        gen = generate_story(s, story_id="story-1", format=ArtifactFormat.ARTICLE.value, reference_time=T)
+
+    assert gen["ai_job"]["provider"] == "mock"
+    with get_session() as s:
+        run = s.query(ai_runs).filter_by(run_id=gen["artifact_id"]).one()
+        job = s.get(ai_jobs, str(run.job_id))
+        artifact = s.query(generated_artifacts).filter_by(artifact_id=gen["artifact_id"]).one()
+        assert artifact.id is not None
+        assert run.job_id == str(job.id)
+        assert job.task_type == "GENERATE"
+
+
+def test_repeated_generation_deterministic_with_router():
+    with get_session() as s:
+        _seed_story_with_claims(s, claim_specs=[
+            {"claim_id": "c-det", "text": "The tax is three euros.", "source_id": "src-det"},
+        ])
+
+    router = _cost_router()
+    out = []
+    for _ in range(2):
+        with get_session() as s:
+            g = generate_story(s, story_id="story-1", format=ArtifactFormat.ARTICLE.value,
+                               reference_time=T, ai_router=router)
+            row = s.query(generated_artifacts).filter_by(artifact_id=g["artifact_id"]).one()
+            out.append((g["artifact_id"], row.title, row.summary, from_jsonable(row.body_json),
+                        g["ai_job"]["tokens_input"], g["ai_job"]["tokens_output"],
+                        g["ai_job"]["cost_usd"]))
+
+    assert len({o[0] for o in out}) == 1          # stable artifact_id
+    assert out[0][1:] == out[1][1:]              # title/summary/body/tokens/cost identical
+
+
 def test_regression_p2_to_p5_full_flow():
     with get_session() as s:
         _seed_story_with_claims(s, story_id="story-e2e", claim_specs=[
@@ -642,7 +771,7 @@ def test_regression_p2_to_p5_full_flow():
         d = s.query(decisions).filter_by(target_type="STORY", target_id="story-e2e").one()
         assert d.decision == "PUBLISH"
 
-    # P6 generation (never publishes by itself).
+    # P4 generation (never publishes by itself).
     with get_session() as s:
         gen = generate_story(s, story_id="story-e2e", format=ArtifactFormat.ARTICLE.value, reference_time=T)
         assert gen["state"] == GenerationState.VALIDATED.value and gen["publishable"] is True

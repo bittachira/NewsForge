@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Analytics — {{ brand }}{% endblock %}
+{% block content %}
+<h1>Analytics</h1>
+{% if rows %}
+<p>Total views: {{ total_views }} &middot; Total revenue: {{ total_revenue }} {{ currency }} &middot; Total AI cost: {{ total_cost }} USD</p>
+<table border="1" cellpadding="4">
+<tr><th>Entity</th><th>Currency</th><th>Views</th><th>Users</th><th>Revenue</th><th>AI cost (USD)</th><th>ROI</th></tr>
+{% for r in rows %}
+<tr>
+<td>{{ r.entity_id }}</td>
+<td>{{ r.currency|upper }}</td>
+<td>{{ r.views|int }}</td>
+<td>{{ r.users|int }}</td>
+<td>{{ "%.2f"|format(r.revenue) }} {{ currency }}</td>
+<td>{{ "%.4f"|format(r.cost_usd) }}</td>
+<td>{% if r.roi is none %}n/a (no cost baseline){% else %}{{ "%.3f"|format(r.roi) }}{% endif %}</td>
+</tr>
+{% endfor %}
+</table>
+{% else %}
+<p>No analytics data yet.</p>
+{% endif %}
+{% endblock %}
