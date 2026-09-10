@@ -4,25 +4,48 @@ on: [push, pull_request]
 env:
   DOCKER_IMAGE: newsforge-mvp
   DOCKER_TAG: ${{ github.sha }}
+  PYTHON_VERSION: '3.12'
+  TZ: UTC
+  LANG: C.UTF-8
+  PIP_DISABLE_PIP_VERSION_CHECK: '1'
+
+concurrency:
+  group: newsforge-staging-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   staging-verification:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 30
     
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
-        
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
         
       - name: Build NewsForge staging image
         run: |
           echo "Building NewsForge staging image..."
           IMAGE_REF="${{ env.DOCKER_IMAGE }}:${{ env.DOCKER_TAG }}"
+          # Deterministic build metadata: GIT_COMMIT and BUILD_TIME are derived
+          # from the source commit, so the image reports exactly which source
+          # produced it. On PR events head_commit.timestamp is empty and the
+          # Dockerfile ARG default ("unknown") kicks in.
           docker build \
             --tag "${IMAGE_REF}" \
             --label "version=${{ github.sha }}" \
+            --build-arg "GIT_COMMIT=${{ github.sha }}" \
+            --build-arg "VERSION=0.1.0" \
+            --build-arg "BUILD_TIME=${{ github.event.head_commit.timestamp }}" \
             .
           echo "Build complete"
         
@@ -224,24 +247,34 @@ jobs:
         run: |
           echo "Running full test suite inside container..."
           
-          # Mount tests directory and install dependencies
-          IMAGE_REF="${{ env.DOCKER_IMAGE }}:${{ env.DOCKER_TAG }}"
+          # Build the dedicated "test" image target: runtime + pytest overlay.
+          # The runtime image is intentionally free of test dependencies.
+          TEST_IMAGE="${{ env.DOCKER_IMAGE }}-test"
+          docker build \
+            --tag "${TEST_IMAGE}" \
+            --target test \
+            --build-arg "GIT_COMMIT=${{ github.sha }}" \
+            --build-arg "VERSION=0.1.0" \
+            . || exit 1
+
           docker run --rm \
             --name newsforge-test-runner-$(date +%s) \
             -v "$GITHUB_WORKSPACE/tests:/app/tests:ro" \
+            -v "$GITHUB_WORKSPACE:/repo:ro" \
             -e NEWSFORGE_MOCK_AI=true \
-            "${IMAGE_REF}" \
-            python -m pytest /app/tests/test_p4_generation.py /app/tests/test_p5_publish_seo.py /app/tests/test_p6_analytics.py -v --tb=short || exit 1
+            -e NEWSFORGE_DB_PATH=/data/newsforge.db \
+            -e NEWSFORGE_REPO_ROOT=/repo \
+            "${TEST_IMAGE}" \
+            python -m pytest /app/tests/test_p4_generation.py /app/tests/test_p5_publish_seo.py /app/tests/test_p6_analytics.py /app/tests/test_reproducibility.py -v --tb=short || exit 1
         
       - name: Run regression tests locally (no Docker)
         run: |
           echo "Running regression tests outside container..."
 
-          # Install runtime + test dependencies (the suite imports fastapi,
-          # sqlalchemy, aiohttp, etc. from the repo's requirements.txt)
-          pip install -r requirements.txt -q 2>/dev/null || true
-          # Install pytest if not available
-          pip install pytest -q 2>/dev/null || true
+          # Install the FROZEN runtime + test dependency set (requirements-dev.txt
+          # overlays the runtime pins with pytest/httpx2). Failures surface loudly:
+          # never silence pip with `|| true` (OPS_HARDENING_REPRODUCIBILITY).
+          python -m pip install --disable-pip-version-check -r requirements-dev.txt
 
           python -m pytest tests/ -q || exit 1
         
@@ -297,6 +330,34 @@ jobs:
             echo "✓ /data is writable by the runtime user"
           else
             echo "✗ /data is not writable by the runtime user"
+            exit 1
+          fi
+
+      - name: Verify image build identity metadata
+        run: |
+          echo "Checking image builds from exactly this commit..."
+          IMAGE_REF="${{ env.DOCKER_IMAGE }}:${{ env.DOCKER_TAG }}"
+          GIT_IN_IMAGE=$(docker inspect "${IMAGE_REF}" \
+            --format '{{range .Config.Env}}{{println .}}{{end}}' \
+            | grep '^NEWSFORGE_GIT_COMMIT=' || true)
+          echo "Image NEWSFORGE_GIT_COMMIT: '${GIT_IN_IMAGE}'"
+          if [ -z "${GIT_IN_IMAGE}" ]; then
+            echo "✗ image has no NEWSFORGE_GIT_COMMIT metadata"
+            exit 1
+          fi
+          GIT_VALUE=$(echo "${GIT_IN_IMAGE}" | sed 's/^NEWSFORGE_GIT_COMMIT=//')
+          if [ "${GIT_VALUE}" = "${{ github.sha }}" ]; then
+            echo "✓ image identity matches ${{ github.sha }}"
+          else
+            echo "✗ expected ${{ github.sha }}, image reports '${GIT_VALUE}'"
+            exit 1
+          fi
+
+          # Runtime image must NOT ship test-only tools, and no .env is baked in.
+          if docker run --rm --entrypoint sh "${IMAGE_REF}" -c 'test ! -e /app/.env'; then
+            echo "✓ no .env file baked into the image"
+          else
+            echo "✗ found a .env file in the image"
             exit 1
           fi
 

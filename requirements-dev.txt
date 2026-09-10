@@ -1,0 +1,7 @@
+# TEST/DEV_DEPENDENCIES (OPS_HARDENING_REPRODUCIBILITY).
+# Installed ONLY by the CI "test" image target and by local development.
+# These are NEVER part of the runtime image (runtime = requirements.txt alone).
+-r requirements.txt
+
+pytest==9.1.1
+httpx2==2.12.0
