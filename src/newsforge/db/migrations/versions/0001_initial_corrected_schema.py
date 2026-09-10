@@ -756,17 +756,30 @@ def upgrade() -> None:
     # NewsForge schema-boundary metadata (_newsforge_meta) — managed admirably by
     # create_all elsewhere, but a migration-created DB must stamp it too so the
     # startup boundary (newsforge.db.schema) stays consistent with migrations.
+    # The stamp insert is dialect-aware: SQLite uses INSERT OR IGNORE, PostgreSQL
+    # (which also supports CREATE TABLE IF NOT EXISTS) uses ON CONFLICT DO NOTHING.
+    is_sqlite = op.get_bind().dialect.name == "sqlite"
     op.execute(
         "CREATE TABLE IF NOT EXISTS _newsforge_meta "
         "(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
     )
-    op.execute(
-        "INSERT OR IGNORE INTO _newsforge_meta (key, value) VALUES ('schema_version', '1')"
-    )
-    op.execute(
-        "INSERT OR IGNORE INTO _newsforge_meta (key, value) VALUES "
-        "('applied_at', datetime('now'))"
-    )
+    if is_sqlite:
+        op.execute(
+            "INSERT OR IGNORE INTO _newsforge_meta (key, value) VALUES ('schema_version', '1')"
+        )
+        op.execute(
+            "INSERT OR IGNORE INTO _newsforge_meta (key, value) VALUES "
+            "('applied_at', datetime('now'))"
+        )
+    else:
+        op.execute(
+            "INSERT INTO _newsforge_meta (key, value) VALUES ('schema_version', '1') "
+            "ON CONFLICT (key) DO NOTHING"
+        )
+        op.execute(
+            "INSERT INTO _newsforge_meta (key, value) VALUES "
+            "('applied_at', current_timestamp::text) ON CONFLICT (key) DO NOTHING"
+        )
 
 
 def downgrade() -> None:
