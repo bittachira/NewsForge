@@ -49,8 +49,10 @@ def build_engine(config: DatabaseConfig | None = None) -> create_engine:
         rel = Path(os.path.relpath(abs_path, Path.cwd())).as_posix()  # forward slashes for the URL
         return create_engine(f"sqlite:///{rel}", **kwargs)
 
-    # POSIX (absolute paths work with 3 slashes) or cross-drive Windows fallback.
-    posix = abs_path.replace(os.sep, "/")
+    # POSIX (absolute path) or cross-drive Windows fallback.
+    posix = str(abs_path).replace(os.sep, "/")
+    if posix.startswith("/"):
+        posix = posix[1:]  # SQLAlchemy canonical absolute URL is sqlite:////<path> (no leading slash)
     url = f"sqlite:////{posix}" if abs_path.is_absolute() else f"sqlite:///{posix}"
     return create_engine(url, **kwargs)
 
