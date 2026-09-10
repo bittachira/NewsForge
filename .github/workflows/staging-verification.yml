@@ -46,8 +46,8 @@ jobs:
             if [ "$HTTP_CODE" = "200" ]; then
               HEALTH=$(curl -s http://localhost:8080/health 2>/dev/null || echo "")
               # Validate JSON and status/db fields
-              if echo "$HEALTH" | grep -q '"status": "ok"' && \
-                 echo "$HEALTH" | grep -q '"db": "connected"'; then
+              if echo "$HEALTH" | grep -q '"status":"ok"' && \
+                 echo "$HEALTH" | grep -q '"db":"connected"'; then
                 echo "Health check passed!"
                 echo "HEALTH_STATUS=success" >> $GITHUB_OUTPUT
                 break
@@ -89,7 +89,7 @@ jobs:
           ATTEMPT=0
           while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
             HEALTH=$(curl -s http://localhost:8090/health 2>/dev/null || echo "")
-            if echo "$HEALTH" | grep -q '"status": "ok"'; then
+            if echo "$HEALTH" | grep -q '"status":"ok"'; then
               break
             fi
             ATTEMPT=$((ATTEMPT + 1))

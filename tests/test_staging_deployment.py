@@ -68,9 +68,27 @@ def test_health_endpoint_sqlalchemy_2x():
 
 
 def test_staging_health_endpoint():
-    """Verify health check works."""
-    # This is a simplified test - full verification happens in CI with Docker
-    pass
+    """Verify /health works and its wire body matches the CI workflow grep.
+
+    The workflow greps for '"status":"ok"' / '"db":"connected"' against the raw
+    response body. Starlette serializes JSON with separators=(",", ":") (no spaces),
+    so the exact no-space body is the deployment contract.
+    """
+    from fastapi.testclient import TestClient
+
+    from newsforge.db.session import use_isolated_database_ctx
+    from src.newsforge.web.app import app
+
+    db_dir = Path.cwd() / ".pytest_tmp"
+    db_dir.mkdir(parents=True, exist_ok=True)
+
+    with use_isolated_database_ctx(str(db_dir / "health.db")):
+        with TestClient(app) as client:
+            resp = client.get("/health")
+            assert resp.status_code == 200
+            assert resp.json() == {"status": "ok", "db": "connected"}
+            assert '"status":"ok"' in resp.text, resp.text
+            assert '"db":"connected"' in resp.text, resp.text
 
 
 def test_staging_articles_empty():

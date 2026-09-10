@@ -34,7 +34,7 @@ def build_engine(config: DatabaseConfig | None = None) -> create_engine:
 
     path = Path(config.path)
     abs_path = Path(os.path.abspath(path))  # canonical absolute OS path (drive-safe on Windows)
-    if not abs_path.is_absolute() and str(abs_path.parent) != ".":
+    if abs_path.is_absolute() and str(abs_path.parent) != ".":
         abs_path.parent.mkdir(parents=True, exist_ok=True)
 
     logger.info("Opening database at %s", abs_path)
