@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Optional
+from sqlalchemy import text
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response
@@ -175,8 +176,8 @@ def create_app() -> FastAPI:
         """Simple health check endpoint for deployment readiness."""
         try:
             with get_session() as s:
-                # Test DB connection
-                s.execute("SELECT 1")
+                # Test DB connection (SQLAlchemy 2.x)
+                s.execute(text("SELECT 1"))
             return {"status": "ok", "db": "connected"}
         except Exception as e:
             return {"status": "error", "db": str(e)}

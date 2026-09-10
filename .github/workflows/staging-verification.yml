@@ -34,7 +34,7 @@ jobs:
           IMAGE_REF="${{ env.DOCKER_IMAGE }}:${{ env.DOCKER_TAG }}"
           docker run -d --name "${HEALTH_CONTAINER}" \
             -p 8080:8000 \
-            -e NEWSFORGE_DB_PATH=/data/newsforge.db \
+            -e NEWSFORGE_DB_PATH=/app/data/newsforge.db \
             -e NEWSFORGE_MOCK_AI=true \
             "${IMAGE_REF}" || exit 1
           
@@ -42,19 +42,26 @@ jobs:
           MAX_ATTEMPTS=30
           ATTEMPT=0
           while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
-            HEALTH=$(curl -s http://localhost:8080/health 2>/dev/null || echo "")
-            if echo "$HEALTH" | grep -q '"status": "ok"'; then
-              echo "Health check passed!"
-              echo "HEALTH_STATUS=success" >> $GITHUB_OUTPUT
-              break
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/health 2>/dev/null || echo "000")
+            if [ "$HTTP_CODE" = "200" ]; then
+              HEALTH=$(curl -s http://localhost:8080/health 2>/dev/null || echo "")
+              # Validate JSON and status/db fields
+              if echo "$HEALTH" | grep -q '"status": "ok"' && \
+                 echo "$HEALTH" | grep -q '"db": "connected"'; then
+                echo "Health check passed!"
+                echo "HEALTH_STATUS=success" >> $GITHUB_OUTPUT
+                break
+              fi
             fi
             ATTEMPT=$((ATTEMPT + 1))
-            echo "Attempt $ATTEMPT/30, waiting..."
+            echo "Attempt $ATTEMPT/30, HTTP: ${HTTP_CODE}, waiting..."
             sleep 2
           done
           
           if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
             echo "Health check failed after max attempts"
+            echo "Container logs:"
+            docker logs "${HEALTH_CONTAINER}" 2>&1 || true
             exit 1
           fi
         
@@ -66,7 +73,7 @@ jobs:
           IMAGE_REF="${{ env.DOCKER_IMAGE }}:${{ env.DOCKER_TAG }}"
           docker run -d --name "${SMOKE_CONTAINER}" \
             -p 8090:8000 \
-            -e NEWSFORGE_DB_PATH=/data/newsforge.db \
+            -e NEWSFORGE_DB_PATH=/app/data/newsforge.db \
             -e NEWSFORGE_MOCK_AI=true \
             "${IMAGE_REF}" || exit 1
           
