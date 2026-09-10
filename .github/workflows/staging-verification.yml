@@ -135,13 +135,16 @@ jobs:
             "${IMAGE_REF}" \
             python -m pytest /app/tests/test_p4_generation.py /app/tests/test_p5_publish_seo.py /app/tests/test_p6_analytics.py -v --tb=short || exit 1
         
-      - name: Run regression tests locally (no Docker)
+- name: Run regression tests locally (no Docker)
         run: |
           echo "Running regression tests outside container..."
-          
+
+          # Install runtime + test dependencies (the suite imports fastapi,
+          # sqlalchemy, aiohttp, etc. from the repo's requirements.txt)
+          pip install -r requirements.txt -q 2>/dev/null || true
           # Install pytest if not available
           pip install pytest -q 2>/dev/null || true
-          
+
           python -m pytest tests/ -q || exit 1
         
       - name: Verify image content safety
