@@ -113,8 +113,8 @@ EOF
       - name: Verify image content safety
         run: |
           echo "Checking container image for secrets..."
-          docker inspect "${{ env.DOCKER_IMAGE }}:${DOCKER_TAG}" --format='{{.Config.Cmd}}' | grep -iE "(python-debug|pip install.*-e|pip install.*git)" || echo "No debug/dev commands found in CMD"
-          docker history "${{ env.DOCKER_IMAGE }}:${DOCKER_TAG}}" --no-trunc --filter=created:"0 days ago" | grep -iE "(secret|key|token|password|credential)" || echo "No obvious secrets in recent image layers"
+          docker inspect "${{ env.DOCKER_IMAGE }}:${DOCKER_TAG}}" --format='{{.Config.Cmd}}' | grep -iE "(python-debug|pip install.*-e|pip install.*git)" || echo "No debug/dev commands found in CMD"
+          docker history "${{ env.DOCKER_IMAGE }}:${DOCKER_TAG}" --no-trunc --filter=created:"0 days ago" | grep -iE "(secret|key|token|password|credential)" || echo "No obvious secrets in recent image layers"
           
       - name: Cleanup
         run: |
