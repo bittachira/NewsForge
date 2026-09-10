@@ -68,9 +68,11 @@ def pg_dsn() -> str:
     finally:
         admin.dispose()
 
-    dsn = base.set(database=name)
+    # IMPORTANT: never pass str(url) (its password is masked to ***); the engine
+    # + migrations need the REAL password, so render the URL with the secret.
+    dsn = base.set(database=name).render_as_string(hide_password=False)
 
-    yield str(dsn)
+    yield dsn
 
     # Dispose every engine that may still hold a connection before dropping.
     admin = build_engine(DatabaseConfig(path=PG_DSN))

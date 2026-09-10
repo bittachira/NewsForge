@@ -25,27 +25,25 @@ def redact_dsn(dsn: str | None) -> str | None:
     """Return ``dsn`` with any password redacted so connection strings never leak
     secrets into logs, errors, metrics or report artefacts.
 
-    Non-DSN values (filesystem paths) are returned verbatim. Malformed URLs are
-    returned with ``***`` in place of the password segment when one seems present.
+    Non-DSN values (filesystem paths) are returned verbatim. Any
+    ``scheme://user:password@host`` shape becomes ``scheme://user:***@host`` via a
+    deterministic regex (works for every SQLAlchemy driver scheme, e.g.
+    ``postgresql+pg8000``); everything else is returned unchanged.
     """
     if dsn is None:
         return None
     text = str(dsn).strip()
     if not text.startswith(("postgresql", "postgres", "mysql", "mariadb")):
         return text
-    try:
-        from urllib.parse import urlsplit, urlunsplit
+    import re
 
-        parts = urlsplit(text)
-        netloc = parts.netloc
-        if "@" in netloc:
-            userinfo, _, host = netloc.rpartition("@")
-            user, _, _ = userinfo.partition(":")
-            netloc = f"{user}:***@{host}"
-            return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
-        return text
-    except Exception:  # noqa: BLE001 - redaction must never crash a log path
-        return text
+    match = re.match(
+        r"^(?P<prefix>[a-zA-Z][a-zA-Z0-9+.-]*://)(?P<user>[^:/@]+):(?P<password>[^@]*)@(?P<rest>.*)$",
+        text,
+    )
+    if match:
+        return f"{match.group('prefix')}{match.group('user')}:***@{match.group('rest')}"
+    return text
 
 
 @dataclass(frozen=True)
@@ -130,7 +128,10 @@ def validate_production_config(cfg: DatabaseConfig | None = None) -> list[str]:
     """Return a list of problems that block PRODUCTION startup.
 
     Only enforced when ``NEWSFORGE_ENVIRONMENT=production`` explicitly; development
-    and test environments are never gated by this check."""
+    and test environments are never gated by this check. The relevant gates read
+    the CURRENT environment (``NEWSFORGE_MOCK_AI`` / ``NEWSFORGE_DEBUG`` /
+    ``NEWSFORGE_SITE_URL``) at call time — the gate runs at process startup, when
+    the environment is final, which also keeps it fully testable via monkeypatch."""
     cfg = cfg or DatabaseConfig()
     problems: list[str] = []
     if not cfg.is_production:
@@ -139,11 +140,11 @@ def validate_production_config(cfg: DatabaseConfig | None = None) -> list[str]:
         problems.append("PRODUCTION requires NEWSFORGE_DATABASE_URL (postgresql://…), not a SQLite file path")
     if not os.getenv("NEWSFORGE_ADMIN_TOKEN"):
         problems.append("PRODUCTION requires NEWSFORGE_ADMIN_TOKEN")
-    if AiConfig().mock:
+    if _env_bool("NEWSFORGE_MOCK_AI", True):
         problems.append("PRODUCTION requires NEWSFORGE_MOCK_AI=false")
-    if ServerConfig().debug:
+    if _env_bool("NEWSFORGE_DEBUG", False):
         problems.append("PRODUCTION forbids NEWSFORGE_DEBUG=true")
-    site_url = BrandConfig().site_url
+    site_url = (os.getenv("NEWSFORGE_SITE_URL", "http://localhost:8000") or "").rstrip("/")
     if not site_url or site_url.startswith("http://localhost"):
         problems.append("PRODUCTION requires NEWSFORGE_SITE_URL to be a public https URL")
     return problems
