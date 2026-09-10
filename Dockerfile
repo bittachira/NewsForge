@@ -87,6 +87,6 @@ CMD ["uvicorn", "newsforge.web.app:app", "--host", "0.0.0.0", "--port", "8000"]
 # ---------------------------------------------------------------------------
 FROM runtime AS test
 USER root
-COPY requirements-dev.txt /tmp/requirements-dev.txt
-RUN /opt/venv/bin/pip install --no-cache-dir --disable-pip-version-check -r /tmp/requirements-dev.txt
+COPY requirements-dev.txt /app/requirements-dev.txt
+RUN /opt/venv/bin/pip install --no-cache-dir --disable-pip-version-check -r /app/requirements-dev.txt
 USER newsforge
