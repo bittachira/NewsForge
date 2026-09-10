@@ -162,7 +162,7 @@ jobs:
           fi
           
           # Check recent image layers for secrets
-          RECENT_LAYERS=$(docker history "${IMAGE_REF}" --no-trunc 2>/dev/null | head -n 10 # most recent layers)
+          RECENT_LAYERS=$(docker history "${IMAGE_REF}" --no-trunc 2>/dev/null | head -n 10)
           if echo "$RECENT_LAYERS" | grep -qiE "(secret|key|token|password|credential)"; then
             echo "✗ Potential secrets found in recent image layers"
             exit 1
