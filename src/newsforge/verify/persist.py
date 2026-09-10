@@ -29,6 +29,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Iterable, Optional
 
+from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
 
 from newsforge.db.models import (
@@ -477,7 +478,9 @@ def build_provenance_chain(session, story_id: Optional[str]) -> dict:
     evidence backs it, and each source's tier. Uses only existing tables — no data duplication.
     """
     claims_rows = list(session.query(claims).filter_by(story_id=str(story_id)).all()) if story_id else []
-    stories_row = (session.query(stories).filter_by(story_id=str(story_id)).first() if story_id else None)
+    stories_row = (session.query(stories).filter(
+        or_(stories.id == str(story_id), stories.story_id == str(story_id))
+    ).first() if story_id else None)
 
     chain = {"story": None, "claims": []}
     if stories_row:

@@ -15,6 +15,8 @@ from __future__ import annotations
 import hashlib
 from typing import Optional
 
+from sqlalchemy import or_
+
 from newsforge.db.base import ts
 from newsforge.db.models import (
     ArtifactFormat,
@@ -253,7 +255,9 @@ def validate_generated_artifact(session, artifact, *, persist: bool = False) -> 
     fmt = str(artifact.format)
     checks: dict = {}
 
-    story_row = session.query(stories).filter_by(story_id=str(artifact.story_id)).first()
+    story_row = session.query(stories).filter(
+        or_(stories.id == str(artifact.story_id), stories.story_id == str(artifact.story_id))
+    ).first()
     checks["story_exists"] = story_row is not None
     checks["format_valid"] = fmt in _FORMAT_VALUES
     checks["title_present"] = bool(artifact.title and str(artifact.title).strip())
@@ -350,7 +354,9 @@ def reconstruct_generation_provenance(session, *, artifact=None, artifact_id: Op
         return {"chain_complete": False, "reason": "no generated artifact found",
                 "story": None, "claims": [], "excluded_claims": [], "decision": None, "artifact": None}
 
-    story_row = session.query(stories).filter_by(story_id=str(row.story_id)).first()
+    story_row = session.query(stories).filter(
+        or_(stories.id == str(row.story_id), stories.story_id == str(row.story_id))
+    ).first()
     decision_row = session.get(decisions, str(row.decision_id)) if row.decision_id else None
 
     refs = from_jsonable(row.claim_refs_json) or []
@@ -452,7 +458,9 @@ def generate_story(session, *, story_id: str, format: str = ArtifactFormat.ARTIC
     gen = generator or DeterministicGenerator()
     effective_time = reference_time if reference_time is not None else ts()
 
-    story_row = session.query(stories).filter_by(story_id=str(story_id)).first()
+    story_row = session.query(stories).filter(
+        or_(stories.id == str(story_id), stories.story_id == str(story_id))
+    ).first()
     if story_row is None:
         raise ValueError(f"story {story_id!r} does not exist")
 
