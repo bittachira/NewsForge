@@ -135,7 +135,7 @@ jobs:
             "${IMAGE_REF}" \
             python -m pytest /app/tests/test_p4_generation.py /app/tests/test_p5_publish_seo.py /app/tests/test_p6_analytics.py -v --tb=short || exit 1
         
-- name: Run regression tests locally (no Docker)
+      - name: Run regression tests locally (no Docker)
         run: |
           echo "Running regression tests outside container..."
 
