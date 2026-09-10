@@ -4,7 +4,6 @@ on: [push, pull_request]
 env:
   DOCKER_IMAGE: newsforge-mvp
   DOCKER_TAG: ${{ github.sha }}
-  IMAGE_REF: ${{ env.DOCKER_IMAGE }}:${{ env.DOCKER_TAG }}
 
 jobs:
   staging-verification:
@@ -20,8 +19,9 @@ jobs:
       - name: Build NewsForge staging image
         run: |
           echo "Building NewsForge staging image..."
+          IMAGE_REF="${{ env.DOCKER_IMAGE }}:${{ env.DOCKER_TAG }}"
           docker build \
-            --tag "${{ env.IMAGE_REF }}" \
+            --tag "${IMAGE_REF}" \
             --label "version=${{ github.sha }}" \
             .
           echo "Build complete"
@@ -31,11 +31,12 @@ jobs:
         run: |
           echo "Starting container for health check..."
           HEALTH_CONTAINER="newsforge-health-test-$(date +%s)"
+          IMAGE_REF="${{ env.DOCKER_IMAGE }}:${{ env.DOCKER_TAG }}"
           docker run -d --name "${HEALTH_CONTAINER}" \
             -p 8080:8000 \
             -e NEWSFORGE_DB_PATH=/tmp/staging-data/newsforge.db \
             -e NEWSFORGE_MOCK_AI=true \
-            "${{ env.IMAGE_REF }}" || exit 1
+            "${IMAGE_REF}" || exit 1
           
           echo "Waiting for service to become available..."
           MAX_ATTEMPTS=30
@@ -62,11 +63,12 @@ jobs:
         run: |
           echo "Running endpoint smoke tests..."
           SMOKE_CONTAINER="newsforge-smoke-test-$(date +%s)"
+          IMAGE_REF="${{ env.DOCKER_IMAGE }}:${{ env.DOCKER_TAG }}"
           docker run -d --name "${SMOKE_CONTAINER}" \
             -p 8090:8000 \
             -e NEWSFORGE_DB_PATH=/tmp/smoke-data/newsforge.db \
             -e NEWSFORGE_MOCK_AI=true \
-            "${{ env.IMAGE_REF }}" || exit 1
+            "${IMAGE_REF}" || exit 1
           
           echo "Waiting for smoke test service to become available..."
           MAX_ATTEMPTS=30
@@ -103,6 +105,7 @@ jobs:
             echo "SMOKE_TESTS=passed" >> $GITHUB_OUTPUT
           else
             echo "SMOKE_TESTS=failed" >> $GITHUB_OUTPUT
+            exit 1
           fi
         
       - name: Run pytest test suite in container
@@ -110,11 +113,12 @@ jobs:
           echo "Running full test suite inside container..."
           
           # Mount tests directory and install dependencies
+          IMAGE_REF="${{ env.DOCKER_IMAGE }}:${{ env.DOCKER_TAG }}"
           docker run --rm \
             --name newsforge-test-runner-$(date +%s) \
             -v "$GITHUB_WORKSPACE/tests:/app/tests:ro" \
             -e NEWSFORGE_MOCK_AI=true \
-            "${{ env.IMAGE_REF }}" \
+            "${IMAGE_REF}" \
             python -m pytest /app/tests/test_p4_generation.py /app/tests/test_p5_publish_seo.py /app/tests/test_p6_analytics.py -v --tb=short || exit 1
         
       - name: Run regression tests locally (no Docker)
@@ -131,7 +135,8 @@ jobs:
           echo "Checking container image for secrets..."
           
           # Check for debug/dev commands in CMD
-          CMD_OUTPUT=$(docker inspect "${{ env.IMAGE_REF }}" --format='{{.Config.Cmd}}')
+          IMAGE_REF="${{ env.DOCKER_IMAGE }}:${{ env.DOCKER_TAG }}"
+          CMD_OUTPUT=$(docker inspect "${IMAGE_REF}" --format='{{.Config.Cmd}}')
           if echo "$CMD_OUTPUT" | grep -qiE "(python-debug|pip install.*-e|pip install.*git)"; then
             echo "✗ Debug/dev commands found in CMD"
             exit 1
@@ -140,7 +145,7 @@ jobs:
           fi
           
           # Check recent image layers for secrets
-          RECENT_LAYERS=$(docker history "${{ env.IMAGE_REF }}" --no-trunc --filter=created:"0 days ago")
+          RECENT_LAYERS=$(docker history "${IMAGE_REF}" --no-trunc --filter=created:"0 days ago")
           if echo "$RECENT_LAYERS" | grep -qiE "(secret|key|token|password|credential)"; then
             echo "✗ Potential secrets found in recent image layers"
             exit 1
