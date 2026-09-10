@@ -27,7 +27,7 @@ Expected response (after DB init):
 
 1. **Clone or copy the repository**
 
-2. **Configure environment** (create `.env` from `.env.template`):
+2. **Configure environment** (copy `.env.example` to `.env`):
 
 ```bash
 cp .env.example .env  # Copy template first
