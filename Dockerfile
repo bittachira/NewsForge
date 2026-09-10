@@ -20,6 +20,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY src/ ./src/
 
+# Make the newsforge package importable (src layout; uvicorn console script does
+# not add /app or /app/src to sys.path and the app imports top-level newsforge.*).
+ENV PYTHONPATH=/app/src
+
 # Create data directory for SQLite database (absolute path /data)
 RUN mkdir -p /data && \
     touch /data/.gitkeep
@@ -28,4 +32,4 @@ RUN mkdir -p /data && \
 COPY .env.example .env
 ENV NEWSFORGE_DB_PATH=/data/newsforge.db
 
-CMD ["uvicorn", "src.newsforge.web.app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "newsforge.web.app:app", "--host", "0.0.0.0", "--port", "8000"]
