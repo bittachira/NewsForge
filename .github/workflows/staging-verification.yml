@@ -34,7 +34,7 @@ jobs:
           IMAGE_REF="${{ env.DOCKER_IMAGE }}:${{ env.DOCKER_TAG }}"
           docker run -d --name "${HEALTH_CONTAINER}" \
             -p 8080:8000 \
-            -e NEWSFORGE_DB_PATH=/app/data/newsforge.db \
+            -e NEWSFORGE_DB_PATH=/data/newsforge.db \
             -e NEWSFORGE_MOCK_AI=true \
             "${IMAGE_REF}" || exit 1
           
@@ -60,8 +60,15 @@ jobs:
           
           if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
             echo "Health check failed after max attempts"
-            echo "Container logs:"
+            echo "=== DIAGNOSTIC: container state ==="
+            docker ps -a --filter "name=${HEALTH_CONTAINER}" 2>&1 || true
+            docker inspect "${HEALTH_CONTAINER}" --format '{{.State.Status}} {{.State.ExitCode}}' 2>&1 || true
+            echo "=== DIAGNOSTIC: container logs ==="
             docker logs "${HEALTH_CONTAINER}" 2>&1 || true
+            echo "=== DIAGNOSTIC: /data existence ==="
+            docker exec "${HEALTH_CONTAINER}" sh -c 'ls -ld /data && ls -la /data' 2>&1 || true
+            echo "=== DIAGNOSTIC: last HTTP response ==="
+            curl -i http://localhost:8080/health 2>&1 || true
             exit 1
           fi
         
@@ -73,7 +80,7 @@ jobs:
           IMAGE_REF="${{ env.DOCKER_IMAGE }}:${{ env.DOCKER_TAG }}"
           docker run -d --name "${SMOKE_CONTAINER}" \
             -p 8090:8000 \
-            -e NEWSFORGE_DB_PATH=/app/data/newsforge.db \
+            -e NEWSFORGE_DB_PATH=/data/newsforge.db \
             -e NEWSFORGE_MOCK_AI=true \
             "${IMAGE_REF}" || exit 1
           
