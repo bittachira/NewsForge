@@ -111,9 +111,11 @@ def test_fk_seam_business_key_inserts_ok_with_defaults():
         assert _count(session, story_signals) == 1
 
 
-def test_fk_seam_would_break_with_enforcement(tmp_path):
-    """Evidence of the seam for the report: on a connection with foreign_keys=ON the
-    exact business-key value is rejected, so enforcement is blocked until a migration."""
+def test_fk_enforcement_on_business_key_columns(tmp_path):
+    """With the corrected schema the foreign keys point at the unique business-key
+    columns, so DML that references REAL business keys succeeds under enforcement
+    (foreign_keys=ON) while a reference to a NON-EXISTENT business key is rejected.
+    Evidence for the FK_ENFORCEMENT capability: the seam is closed."""
     db_path = tmp_path / "fk.db"
     engine = build_engine(DatabaseConfig(path=db_path))
     init_db(engine)
@@ -127,18 +129,33 @@ def test_fk_seam_would_break_with_enforcement(tmp_path):
             "VALUES ('src-1', 'src-1', 'S', 'WEBSITE', 'es', 'TIER_2', 50, 'active')"
         )
         con.execute(
-            "INSERT INTO source_items (id, source_id, title, fetched_at, dedupe_hash) "
-            "VALUES ('item-1', 'src-1', 'T', '2026-01-01T00:00:00+00:00', 'h1')"
-        )
-        con.execute(
             "INSERT INTO stories (id, story_id, slug, status, trust_score, created_at, updated_at) "
             "VALUES ('story-pk', 'story-1', 's1', 'ACTIVE', 0, "
             "'2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')"
         )
+        # Valid business-key references are accepted: source_id -> sources.source_id.
+        con.execute(
+            "INSERT INTO source_items (id, source_id, title, fetched_at, dedupe_hash) "
+            "VALUES ('item-1', 'src-1', 'T', '2026-01-01T00:00:00+00:00', 'h1')"
+        )
+        # Valid business-key reference: story_id -> stories.story_id.
+        con.execute(
+            "INSERT INTO story_signals (id, story_id, item_id, created_at) "
+            "VALUES ('sig-1', 'story-1', 'item-1', '2026-01-01T00:00:00+00:00')"
+        )
+        # Non-existent business key -> FK violation on story_signals.story_id.
         with pytest.raises(sqlite3.IntegrityError) as exc_info:
             con.execute(
                 "INSERT INTO story_signals (id, story_id, item_id, created_at) "
-                "VALUES ('sig-1', 'story-1', 'item-1', '2026-01-01T00:00:00+00:00')"
+                "VALUES ('sig-2', 'story-nope', 'item-1', '2026-01-01T00:00:00+00:00')"
+            )
+        assert "foreign key" in str(exc_info.value).lower()
+        con.rollback()
+        # Non-existent business key -> FK violation on source_items.source_id.
+        with pytest.raises(sqlite3.IntegrityError) as exc_info:
+            con.execute(
+                "INSERT INTO source_items (id, source_id, title, fetched_at, dedupe_hash) "
+                "VALUES ('item-2', 'src-nope', 'T', '2026-01-01T00:00:00+00:00', 'h2')"
             )
         assert "foreign key" in str(exc_info.value).lower()
         con.rollback()
@@ -415,3 +432,46 @@ def test_concurrent_writes_all_committed():
 
     with get_session_factory()() as session:
         assert _count(session, stories) == n_threads
+
+
+# --------------------------------------------------------------------------- #
+# Backup provider abstraction (dialect-aware factory; SQLite + PostgreSQL)
+# --------------------------------------------------------------------------- #
+def test_provider_factory_selects_sqlite_for_file_path(tmp_path, monkeypatch):
+    monkeypatch.delenv("NEWSFORGE_DATABASE_URL", raising=False)
+    monkeypatch.setenv("NEWSFORGE_DB_PATH", str(tmp_path / "c.db"))
+    provider = db.get_backup_provider()
+    assert isinstance(provider, db.SQLiteBackupProvider)
+
+
+def test_provider_factory_selects_postgres_for_dsn(monkeypatch):
+    monkeypatch.setenv(
+        "NEWSFORGE_DATABASE_URL", "postgresql://user:pass@localhost:5432/newsforge_db"
+    )
+    provider = db.get_backup_provider()
+    assert isinstance(provider, db.PostgresBackupProvider)
+    assert provider.dsn == "postgresql://user:pass@localhost:5432/newsforge_db"
+
+
+def test_sqlite_provider_snapshot_round_trip(tmp_path):
+    db_path = tmp_path / "pv.db"
+    _seed_live_db(db_path, ["x"])
+    provider = db.SQLiteBackupProvider(db_path=db_path)
+    snap = provider.create_backup(tmp_path / "out")
+    assert snap.is_file() and "newsforge-" in snap.name
+    provider.verify(snap)
+    assert restore_database(snap, tmp_path / "restored.db") == tmp_path / "restored.db"
+
+
+def test_postgres_provider_error_redacts_password(tmp_path, monkeypatch):
+    """With no pg_dump on PATH the provider must fail with the DSN *redacted*:
+    a spawned CLI error must never leak the password into the message."""
+    monkeypatch.setenv("PATH", str(tmp_path))  # empty PATH -> no executables
+    provider = db.PostgresBackupProvider(
+        dsn="postgresql://alice:s3cr3t@db.internal:5432/newsforge_db"
+    )
+    with pytest.raises(BackupError) as exc:
+        provider.create_backup(tmp_path / "backups")
+    message = str(exc.value)
+    assert "alice:***@" in message
+    assert "s3cr3t" not in message

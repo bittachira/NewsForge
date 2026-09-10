@@ -230,10 +230,11 @@ def _risk_from_verdict(verdict: str) -> Optional[str]:
 
 def _create_review_task(session, decision_id, target_type, target_id, reasons, decision) -> Optional[str]:
     """Create a human-review queue entry (§13) with everything the reviewer needs."""
-    story = session.query(stories).filter_by(id=target_id).first() if target_type == "STORY" else None
+    # target_id is the STORY business key (never the UUID pk); store it on the task as-is.
+    story = session.query(stories).filter_by(story_id=target_id).first() if target_type == "STORY" else None
     task = review_tasks(
         decision_id=decision_id,
-        story_id=(story.story_id if (story and story.story_id) else None),
+        story_id=(story.story_id if (story and story.story_id) else target_id),
         claim_ids_json=None,
         status="ASSIGNED",
         assigned_to="",  # filled by a scheduler/worker; backend leaves this ready (§13)
@@ -477,10 +478,14 @@ def build_provenance_chain(session, story_id: Optional[str]) -> dict:
     to answer: which story, which claim, which article originated it, which source published it, what
     evidence backs it, and each source's tier. Uses only existing tables — no data duplication.
     """
-    claims_rows = list(session.query(claims).filter_by(story_id=str(story_id)).all()) if story_id else []
     stories_row = (session.query(stories).filter(
         or_(stories.id == str(story_id), stories.story_id == str(story_id))
     ).first() if story_id else None)
+    # Claims are keyed by the story BUSINESS key (never the UUID pk).
+    claims_rows = list(
+        session.query(claims).filter_by(story_id=str(stories_row.story_id)).all()
+        if (stories_row and stories_row.story_id) else []
+    )
 
     chain = {"story": None, "claims": []}
     if stories_row:

@@ -287,10 +287,12 @@ def test_end_to_end_source_to_article_read():
         assert len(arts) == 1, "one persistent article for the published story"
         art = arts[0]
         assert str(art.status) == ArticleStatus.PUBLISHED.value
-        assert s.query(published_snapshots).filter_by(story_id=art.story_id).count() >= 1
-        assert s.query(destination_metrics).filter_by(story_id=art.story_id).count() >= 1
-
         story = s.query(stories).filter_by(id=art.story_id).one()
+        # articles are keyed by the story UUID pk; snapshots/metrics by the
+        # story BUSINESS key (business-key coherence after the FK repoint).
+        assert s.query(published_snapshots).filter_by(story_id=story.story_id).count() >= 1
+        assert s.query(destination_metrics).filter_by(story_id=story.story_id).count() >= 1
+
         slug = art.slug or story.slug or story.story_id
 
     r = _client().get(f"/articles/{slug}")

@@ -92,9 +92,13 @@ class _AlwaysBad(Destination):
 
 
 def _seed_story(session, *, story_id="story-1", summary="Summary v1", status="ACTIVE", trust_score=0):
-    """Seed a real Story with a non-null summary so snapshots insert cleanly."""
+    """Seed a real Story with a non-null summary so snapshots insert cleanly.
+
+    story_id is BOTH the stories.id PK and the business key stories.story_id
+    (tests run with the PK==business-key convention; §business-key coherence)."""
     st = stories()
     st.id = story_id
+    st.story_id = story_id
     st.slug = story_id
     st.title = "Test Story"
     st.summary = summary

@@ -30,11 +30,12 @@ def _apply_sqlite_pragmas(dbapi_connection, connection_record):  # noqa: ARG001 
       fsyncing on every commit (the durability/speed trade-off recommended by SQLite).
     - ``busy_timeout=30000``: wait up to 30s for a lock instead of failing immediately
       with "database is locked".
-    - ``foreign_keys=OFF`` **deliberately**: the MVP schema stores *business keys* inside
-      FK columns that reference ``stories.id`` (``story_signals.story_id``,
-      ``publications.story_id``). SQLite only enforces FKs when this PRAGMA is ON, and
-      flipping it ON now would reject legitimate inserts (P1-P5 regression). The seam
-      must be resolved in a dedicated migration before enforcement is enabled.
+    - ``foreign_keys=OFF`` **deliberately for SQLite only**: enforcement in SQLite is a
+      per-connection PRAGMA with different semantics than PostgreSQL, and WAL + deferred
+      FK checks add lock surface that the MVP concurrency model does not need. The
+      business-key FK seam was closed in the schema itself (foreign keys now point at the
+      unique ``stories.story_id`` / ``sources.source_id`` columns), so PostgreSQL — which
+      ALWAYS enforces foreign keys — validates the same invariant without any code change.
     """
     cur = dbapi_connection.cursor()
     cur.execute("PRAGMA journal_mode=WAL")
@@ -57,6 +58,7 @@ def build_engine(config: DatabaseConfig | None = None) -> create_engine:
     if isinstance(config.path, str) and config.path.startswith(
         ("postgresql", "postgres", "mysql", "mariadb")
     ):
+        logger.info("Opening database at %s", config.redacted_path)  # password NEVER logged
         return create_engine(config.path, echo=config.echo_sql, future=True)
 
     path = Path(config.path)
@@ -175,20 +177,73 @@ def get_session() -> Iterator[Session]:
         session.close()
 
 
+def _alembic_upgrade(engine) -> None:
+    """Run Alembic migrations to head on ``engine`` (SQLite + PostgreSQL).
+
+    Migration state is tracked by the ``alembic_version`` table owned by
+    :mod:`newsforge.db.migrations`. Three starts are possible:
+
+    * **Fresh database** (no tables): run every migration (0001 creates the
+      corrected baseline, 0002 seals the business-key seam — both are no-ops in
+      terms of data because the schema was authored corrected already).
+    * **Legacy ``create_all`` database** (tables, no ``alembic_version``):
+      adopt it as the 0001 baseline (after the schema boundary accepts it) and
+      upgrade so the business-key rebase (0002) applies in place.
+    * **Already migrated**: a simple ``upgrade head`` (a cheap no-op).
+    """
+    from sqlalchemy import inspect as sa_inspect
+
+    from alembic import command
+    from alembic.config import Config
+
+    # The migrations directory ships INSIDE the package so a bare copy of `src`
+    # (the Docker image) can bootstrap the schema without extra assets.
+    migrations_dir = Path(__file__).parent / "migrations"
+    cfg = Config(str(migrations_dir / "alembic.ini"))
+    cfg.set_main_option("script_location", str(migrations_dir))
+    cfg.set_main_option(
+        "sqlalchemy.url", engine.url.render_as_string(hide_password=False)
+    )
+    # Migrations are quiet by default: they inherit the app's structured logging
+    # (logger level WARN) so a normal startup produces no migration chatter.
+    import logging
+
+    logging.getLogger("alembic").setLevel(logging.WARNING)
+    logging.getLogger("alembic.runtime.migration").setLevel(logging.WARNING)
+
+    tables = set(sa_inspect(engine).get_table_names())
+    if "alembic_version" not in tables and any(t for t in tables if t != "alembic_version"):
+        # Legacy create_all-era database: the pre-migration schema was the
+        # equivalence of revision 0001; stamp it then upgrade to head.
+        ensure_schema_compatible(engine)
+        command.stamp(cfg, "0001")
+    command.upgrade(cfg, "head")
+
+
 def init_db(engine: create_engine | None = None) -> None:
-    """Create all tables + validate the schema boundary. Idempotent on every startup.
+    """Create/migrate the schema + validate the schema boundary. Idempotent on startup.
 
     Defaults to the shared engine (the one ``get_session``/routes use) so the
-    schema is always created on the database that serves requests — even when
+    schema is always migrated on the database that serves requests — even when
     tests swapped in an isolated database.
 
-    After ``create_all`` (which only creates *missing* tables and never alters
-    existing ones) the :func:`~newsforge.db.schema.ensure_schema_compatible` boundary
-    runs: it stamps ``_newsforge_meta.schema_version`` on a fresh DB and REFUSES to
-    start when the on-disk version differs from this build or a declared column is
-    missing (fail-fast instead of runtime ``no such column`` errors).
+    Schema management is handled by Alembic (``newsforge.db.migrations``),
+    which runs ``upgrade head`` programmatically. Tests and ``use_isolated_database``
+    keep ``Base.metadata.create_all`` as the fast path (schema parity is asserted
+    by ``tests`` that compare both). After migrations the
+    :func:`~newsforge.db.schema.ensure_schema_compatible` boundary runs: it stamps
+    ``_newsforge_meta.schema_version`` on a fresh DB and REFUSES to start when the
+    on-disk version differs from this build or a declared column is missing
+    (fail-fast instead of runtime ``no such column`` errors).
     """
     engine = engine or _ensure_shared()[0]
-    Base.metadata.create_all(bind=engine)
+    if engine.dialect.name == "sqlite" and not getattr(engine.url, "database", None):
+        # In-memory SQLite: Alembic's engine_from_config opens its own connection
+        # and would rebuild an empty volatile database; keep the in-place path.
+        Base.metadata.create_all(bind=engine)
+        version = ensure_schema_compatible(engine)
+        logger.info("Database schema ready (schema_version=%s).", version)
+        return
+    _alembic_upgrade(engine)
     version = ensure_schema_compatible(engine)
     logger.info("Database schema ready (schema_version=%s).", version)

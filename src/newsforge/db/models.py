@@ -211,7 +211,7 @@ class source_items(Base):
     __tablename__ = "source_items"
 
     id: Mapped[str] = uuid_pk()
-    source_id: Mapped[str] = mapped_column(ForeignKey("sources.id"), index=True, nullable=False)
+    source_id: Mapped[str] = mapped_column(ForeignKey("sources.source_id"), index=True, nullable=False)
     title: Mapped[str | None] = mapped_column(Text)
     url: Mapped[str | None] = mapped_column(String(2048))
     description: Mapped[str | None] = mapped_column(Text)
@@ -237,7 +237,7 @@ class story_signals(Base):
     __tablename__ = "story_signals"
 
     id: Mapped[str] = uuid_pk()
-    story_id: Mapped[str] = mapped_column(String(128), ForeignKey("stories.id"), index=True, nullable=False)
+    story_id: Mapped[str] = mapped_column(String(128), ForeignKey("stories.story_id"), index=True, nullable=False)
     item_id: Mapped[str] = mapped_column(String(36), ForeignKey("source_items.id"), index=True, nullable=False)
     created_at: Mapped[str] = ts_col()
 
@@ -358,7 +358,8 @@ class trust_evaluations(Base):
 
     id: Mapped[str] = uuid_pk()
     target_type: Mapped[str] = mapped_column(String(20), nullable=False)  # STORY / CLAIM
-    target_id: Mapped[str] = mapped_column(String(36), index=True, nullable=False)
+    # STORY targets use the business key (up to 128 chars); CLAIM targets use claim_id.
+    target_id: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
     trust_score: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     source_trust: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     independent_corroboration: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
@@ -387,7 +388,8 @@ class quality_evaluations(Base):
 
     id: Mapped[str] = uuid_pk()
     target_type: Mapped[str] = mapped_column(String(20), nullable=False)  # STORY / CLAIM
-    target_id: Mapped[str] = mapped_column(String(36), index=True, nullable=False)
+    # STORY targets use the business key (up to 128 chars); CLAIM targets use claim_id.
+    target_id: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
     passed: Mapped[bool] = mapped_column(default=False, nullable=False)
     score: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)  # 0-100 composite
     reasons_json: Mapped[str | None] = json_col()
@@ -413,7 +415,8 @@ class decisions(Base):
 
     id: Mapped[str] = uuid_pk()
     target_type: Mapped[str] = mapped_column(String(20), nullable=False)  # STORY / CLAIM
-    target_id: Mapped[str] = mapped_column(String(36), index=True, nullable=False)
+    # target_id carries a story BUSINESS key or a claim key (never the UUID pk).
+    target_id: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
     decision: Mapped[str] = mapped_column(String(20), default=DecisionState.PUBLISH.value, nullable=False)
     risk_level: Mapped[str | None] = mapped_column(String(16))  # GREEN/YELLOW/ORANGE/RED
     trust_score: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
@@ -487,7 +490,7 @@ class prices(Base):
 
     id: Mapped[str] = uuid_pk()
     product_id: Mapped[str | None] = mapped_column(ForeignKey("products.id"), index=True, nullable=False)
-    value: Mapped[float] = mapped_column(BigInteger, nullable=False)
+    value: Mapped[float] = mapped_column(default=0.0, nullable=False)
     currency: Mapped[str] = mapped_column(String(8), default="EUR", nullable=False)
     as_of_date: Mapped[str] = ts_col()
     source_url: Mapped[str | None] = mapped_column(String(2048))
@@ -552,7 +555,7 @@ class affiliate_links(Base):
     network: Mapped[str] = mapped_column(String(128), default="generic", nullable=False)
     program: Mapped[str | None] = mapped_column(String(255))
     commission_pct: Mapped[float] = mapped_column(default=0.0, nullable=False)
-    price: Mapped[float] = mapped_column(BigInteger, default=0.0, nullable=False)
+    price: Mapped[float] = mapped_column(default=0.0, nullable=False)
     currency: Mapped[str] = mapped_column(String(8), default="EUR", nullable=False)
     available: Mapped[bool] = mapped_column(default=True, nullable=False)
     language: Mapped[str] = mapped_column(String(8), default="es", nullable=False)
@@ -587,10 +590,10 @@ class analytics(Base):
     __tablename__ = "analytics"
 
     id: Mapped[str] = uuid_pk()
-    entity_id: Mapped[str | None] = mapped_column(String(36), index=True, nullable=True)  # article/story/user...
+    entity_id: Mapped[str | None] = mapped_column(String(128), index=True, nullable=True)  # article/story/user...
     metric: Mapped[str] = mapped_column(String(64), nullable=False)  # traffic/users/pageviews/CTR/revenue...
     dimension_value: Mapped[str | None] = mapped_column(String(255))
-    value: Mapped[float] = mapped_column(BigInteger, default=0.0, nullable=False)
+    value: Mapped[float] = mapped_column(default=0.0, nullable=False)
     recorded_at: Mapped[str] = ts_col()
 
 
@@ -683,7 +686,7 @@ class audit_logs(Base):
     actor: Mapped[str | None] = mapped_column(String(128))
     action: Mapped[str] = mapped_column(Text, nullable=False)
     entity_type: Mapped[str | None] = mapped_column(String(64))
-    entity_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    entity_id: Mapped[str | None] = mapped_column(String(128), index=True)
     before_json: Mapped[str | None] = json_col()
     after_json: Mapped[str | None] = json_col()
     # Which rule version produced this audit record (§18). Lets an auditor trace a decision back to
@@ -722,7 +725,7 @@ class publications(Base):
     __tablename__ = "publications"
 
     id: Mapped[str] = uuid_pk()
-    story_id: Mapped[str] = mapped_column(String(128), ForeignKey("stories.id"), index=True, nullable=False)
+    story_id: Mapped[str] = mapped_column(String(128), ForeignKey("stories.story_id"), index=True, nullable=False)
     destination_key: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
     decision_id: Mapped[str] = mapped_column(String(36), ForeignKey("decisions.id"), index=True, nullable=False)
     status: Mapped[str] = mapped_column(String(20), default=PublicationStatus.PENDING.value, nullable=False)

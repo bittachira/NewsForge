@@ -99,9 +99,10 @@ def _default_claim_spec_builder(
     """Build claim specs from a story's linked source items.
 
     Each persisted source_item linked via story_signals becomes one claim spec
-    keyed by the UUID PK story_handle.  Tiers are resolved from the originating
-    source.  The claim_id is a deterministic SHA-256 truncated to 16 hex chars
-    so re-runs never duplicate claim rows (idempotent by UNIQUE constraint)."""
+    keyed by the STORY BUSINESS KEY (the deterministic cluster key). Tiers are
+    resolved from the originating source. The claim_id is a deterministic SHA-256
+    truncated to 16 hex chars so re-runs never duplicate claim rows (idempotent by
+    UNIQUE constraint)."""
     linked = session.query(story_signals).filter_by(story_id=business_key).all()
     specs: list[dict] = []
     for sig in linked:
@@ -119,7 +120,7 @@ def _default_claim_spec_builder(
         specs.append({
             "claim_id": claim_id,
             "text": text,
-            "story_id": story_handle,
+            "story_id": business_key,
             "source_item_ids": [str(item.id)],
             "tiers": [tier],
             "publication_date": getattr(item, "published_at", None),
@@ -283,7 +284,7 @@ def run_pipeline(
                     continue
                 handle = str(row.id)
 
-            # Phase 3: Trust / Claims / Decision
+            # Phase 3: Trust / Claims / Decision (keyed by the story BUSINESS key).
             with get_session() as session:
                 builder = claim_spec_builder or _default_claim_spec_builder
                 specs = builder(session, handle, bk, reference_time=ref_iso)
@@ -301,7 +302,7 @@ def run_pipeline(
                       run_id=ctx.run_id, request_id=ctx.request_id)
             verification = run_verification(
                 claims_specs=specs,
-                story_id=handle,
+                story_id=bk,
                 reference_time=ref_iso,
             )
             log_event(logger, "phase_end", phase="VERIFY", result="ok",
@@ -329,7 +330,7 @@ def run_pipeline(
                           run_id=ctx.run_id, request_id=ctx.request_id)
                 artifact = generate_story(
                     session,
-                    story_id=handle,
+                    story_id=bk,
                     format=format,
                     reference_time=ref_iso,
                     ai_router=ai_router,
@@ -344,7 +345,7 @@ def run_pipeline(
                           run_id=ctx.run_id, request_id=ctx.request_id)
                 pub = publish_story(
                     session,
-                    story_id=handle,
+                    story_id=bk,
                     destinations=destinations,
                 )
                 log_event(logger, "phase_end", phase="PUBLISH",
@@ -356,7 +357,7 @@ def run_pipeline(
                 if pub.get("published"):
                     measurement = record_destination_metrics(
                         session,
-                        story_id=handle,
+                        story_id=bk,
                         reference_time=ref_iso,
                     )
 
@@ -369,9 +370,9 @@ def run_pipeline(
 
                 with get_session() as session:
                     for obs in (traffic_observations or []):
-                        record_traffic_event(session, entity_id=handle, **obs)
+                        record_traffic_event(session, entity_id=bk, **obs)
                     for obs in (revenue_observations or []):
-                        record_revenue_event(session, entity_id=handle, **obs)
+                        record_revenue_event(session, entity_id=bk, **obs)
                     session.commit()
                 analytics_result = {
                     "traffic": len(traffic_observations or []),

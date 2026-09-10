@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from newsforge.core.logger import get_logger, log_event
 from newsforge.core.netguard import SSRFError, assert_public_target
 from newsforge.db.session import get_session
-from newsforge.db.models import SourceType, SourceTier, source_items
+from newsforge.db.models import SourceType, SourceTier, source_items, sources
 from newsforge.sources.trust import item_confidence
 
 logger = get_logger("sources.engine")
@@ -372,10 +372,10 @@ async def ingest_source(source: dict) -> IngestResult:
             session.flush()
             added = len(seen) - skipped
 
-            # Health-check the source.
-            src_row = session.query(ModelType).filter_by(source_id=source_id).first()
-            if src_row:
-                src_row.last_checked = datetime.now().isoformat(timespec="seconds")
+            # Health-check the SOURCE row (sources.last_checked) — not a source_item.
+            health = session.query(sources).filter_by(source_id=source_id).first()
+            if health is not None:
+                health.last_checked = datetime.now().isoformat(timespec="seconds")
             session.commit()  # persist inserts + health-check before closing
         result.added = len(seen)   # seen only holds NEW keys (dups are skipped, never added)
         result.skipped_dupe = skipped

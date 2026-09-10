@@ -27,6 +27,7 @@ from __future__ import annotations
 import hashlib
 import time
 
+from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
 
 from newsforge.core.logger import get_logger, log_event
@@ -367,7 +368,9 @@ def reconstruct_chain(session, *, publication_id: str) -> dict:
         return {"error": "publication not found", "chain": None}
 
     decision_row = _decision_of(session, pub)
-    story_row = session.query(stories).filter_by(id=pub.story_id).first()
+    story_row = session.query(stories).filter(
+        or_(stories.id == pub.story_id, stories.story_id == pub.story_id)
+    ).first()
     attempts = list(
         session.query(publication_attempts).filter_by(publication_id=str(pub.id)).all()
     )

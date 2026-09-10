@@ -16,6 +16,8 @@ from newsforge.db.session import (  # noqa: F401
 )
 from newsforge.db.backup import (  # noqa: F401
     backup_database, restore_database, BackupError,
+    get_backup_provider, SQLiteBackupProvider, PostgresBackupProvider,
+    DatabaseBackupProvider,
 )
 from newsforge.db.schema import (  # noqa: F401
     SCHEMA_VERSION, SchemaIncompatibleError, ensure_schema_compatible,
@@ -41,6 +43,8 @@ __all__ = [
     "get_session", "init_db",
     # Persistence (OPS hardening): consistent offline backup/restore + schema boundary
     "backup_database", "restore_database", "BackupError",
+    "get_backup_provider", "SQLiteBackupProvider", "PostgresBackupProvider",
+    "DatabaseBackupProvider",
     "SCHEMA_VERSION", "SchemaIncompatibleError", "ensure_schema_compatible",
     "ensure_schema_version", "validate_column_drift",
 ]

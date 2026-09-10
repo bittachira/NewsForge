@@ -113,10 +113,12 @@ def test_happy_path_full_pipeline():
     assert outcome.publish["published"] is True
     assert outcome.measurement is not None
 
-    # Verify DB: publication row exists
+    # Verify DB: publication row exists (keyed by the story BUSINESS key)
     with get_session() as s:
-        pubs = s.query(publications).filter_by(story_id=outcome.story_handle).all()
+        pubs = s.query(publications).filter_by(story_id=outcome.business_key).all()
         assert len(pubs) >= 1
+    for p in pubs:
+        assert str(p.status) == "COMPLETED"
         for p in pubs:
             assert str(p.status) == "COMPLETED"
 
@@ -227,7 +229,7 @@ def test_idempotent_rerun():
 
     # No duplicate publications
     with get_session() as s:
-        pubs = s.query(publications).filter_by(story_id=o1.story_handle).all()
+        pubs = s.query(publications).filter_by(story_id=o1.business_key).all()
         assert len(pubs) == 1  # exactly one publication, not two
 
     # No duplicate AI runs
@@ -286,9 +288,9 @@ def test_analytics_events_recorded():
     assert outcome.analytics["revenue"] == 1
 
     with get_session() as s:
-        traffic_rows = s.query(analytics).filter_by(entity_id=outcome.story_handle, metric="traffic").all()
+        traffic_rows = s.query(analytics).filter_by(entity_id=outcome.business_key, metric="traffic").all()
         assert len(traffic_rows) >= 1
-        revenue_rows = s.query(analytics).filter_by(entity_id=outcome.story_handle, metric="revenue").all()
+        revenue_rows = s.query(analytics).filter_by(entity_id=outcome.business_key, metric="revenue").all()
         assert len(revenue_rows) >= 1
 
 

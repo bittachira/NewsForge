@@ -38,7 +38,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.templating import Jinja2Templates
 
 from newsforge.analytics import content_roi_query, total_ai_cost
-from newsforge.config import BrandConfig
+from newsforge.config import BrandConfig, assert_production_safe
 from newsforge.core.build_info import get_build_info
 from newsforge.core.logger import get_logger, log_event
 from newsforge.core.metrics import metrics
@@ -83,7 +83,7 @@ def _published_entries(session) -> list[dict]:
         status=PublicationStatus.COMPLETED.value).all()
     best: dict[str, dict] = {}
     for pub in pubs:
-        story = session.get(stories, str(pub.story_id))
+        story = session.query(stories).filter_by(story_id=str(pub.story_id)).first()
         if story is None or not story.slug:
             continue
         entry = {
@@ -126,7 +126,7 @@ def _article_view(session, slug: str) -> Optional[dict]:
     if story is None:
         return None
     pub = (session.query(publications)
-           .filter_by(story_id=str(story.id), status=PublicationStatus.COMPLETED.value)
+           .filter_by(story_id=str(story.story_id), status=PublicationStatus.COMPLETED.value)
            .order_by(publications.published_at.desc()).first())
     if pub is None:
         return None  # not published -> never rendered publicly
@@ -156,7 +156,9 @@ def _article_view(session, slug: str) -> Optional[dict]:
 def create_app() -> FastAPI:
     @asynccontextmanager
     async def _lifespan(app: FastAPI):
-        # Ensure the SQLite schema exists before serving (fresh /data volume).
+        # Fail-fast production config gate (only enforced when ENVIRONMENT=production).
+        assert_production_safe()
+        # Ensure the schema exists/migrates before serving (fresh /data volume).
         init_db()
         info = get_build_info()
         log_event(logger, "app_startup",

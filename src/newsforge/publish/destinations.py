@@ -170,7 +170,7 @@ class InternalDestination(Destination):
                 title = story.title or slug
 
                 artifact = (session.query(generated_artifacts)
-                            .filter_by(story_id=str(story.id))
+                            .filter_by(story_id=str(story.story_id))
                             .order_by(generated_artifacts.created_at.desc()).first())
 
                 body = from_jsonable(artifact.body_json) if artifact is not None else None

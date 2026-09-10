@@ -204,7 +204,7 @@ def _idempotent_upsert(session, model, **fields):
 # --------------------------------------------------------------------------- #
 def _editorial_snapshot_fields(session, story_id):
     """Current EDITORIAL state of a story. READ-ONLY — never mutates the Story row."""
-    story = session.query(stories).filter_by(id=str(story_id)).first()
+    story = session.query(stories).filter_by(story_id=str(story_id)).first()
     if story is None:
         return None
     # ``title``/``summary`` are NOT NULL on the snapshot row but may be NULL on the story;

@@ -1,8 +1,8 @@
 """Central configuration for NewsForge.
 
 All tunables live here so the platform can be reconfigured without code changes:
-brand, languages, database path, AI provider settings and every quality / trust /
-decision threshold that gates what gets published.
+brand, languages, database location, AI provider settings and every quality /
+trust / decision threshold that gates what gets published.
 
 Nothing sensitive is hardcoded in this module — secrets come from environment
 variables (see .env.example) and are never committed.
@@ -19,6 +19,33 @@ def _env_bool(name: str, default: bool = False) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def redact_dsn(dsn: str | None) -> str | None:
+    """Return ``dsn`` with any password redacted so connection strings never leak
+    secrets into logs, errors, metrics or report artefacts.
+
+    Non-DSN values (filesystem paths) are returned verbatim. Malformed URLs are
+    returned with ``***`` in place of the password segment when one seems present.
+    """
+    if dsn is None:
+        return None
+    text = str(dsn).strip()
+    if not text.startswith(("postgresql", "postgres", "mysql", "mariadb")):
+        return text
+    try:
+        from urllib.parse import urlsplit, urlunsplit
+
+        parts = urlsplit(text)
+        netloc = parts.netloc
+        if "@" in netloc:
+            userinfo, _, host = netloc.rpartition("@")
+            user, _, _ = userinfo.partition(":")
+            netloc = f"{user}:***@{host}"
+            return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+        return text
+    except Exception:  # noqa: BLE001 - redaction must never crash a log path
+        return text
 
 
 @dataclass(frozen=True)
@@ -50,10 +77,23 @@ def _resolve_data_path(raw: str) -> Path:
 
 
 def _default_db_path() -> str | Path:
+    """Resolve the database source: canonical DSN first, then legacy path var.
+
+    ``NEWSFORGE_DATABASE_URL`` is the authoritative database configuration for this
+    phase (PostgreSQL readiness). When set it is passed through to SQLAlchemy
+    verbatim — it is NEVER coerced to a ``Path``. ``NEWSFORGE_DB_PATH`` remains the
+    legacy SQLite path (also DSN-passthrough aware) with lower precedence."""
+    dsn = os.getenv("NEWSFORGE_DATABASE_URL")
+    if dsn and str(dsn).strip():
+        return str(dsn).strip()
     raw = os.getenv("NEWSFORGE_DB_PATH", "data/newsforge.db")
     if isinstance(raw, str) and raw.startswith(("postgresql", "postgres", "mysql", "mariadb")):
         return raw  # DSN passthrough (dialect swap) MUST NOT be coerced to a Path
     return _resolve_data_path(raw)
+
+
+def _default_environment() -> str:
+    return os.getenv("NEWSFORGE_ENVIRONMENT", "development").strip().lower()
 
 
 def _default_backup_dir() -> Path:
@@ -66,11 +106,54 @@ class DatabaseConfig:
 
     ``path`` is either a filesystem path (resolved deterministically) or a full
     DSN string (``postgresql://…``) passed through to SQLAlchemy verbatim.
-    ``backup_dir`` hosts offline SQLite backups created by ``newsforge.db.backup``."""
+    ``NEWSFORGE_DATABASE_URL`` sets the DSN canonically; ``NEWSFORGE_DB_PATH``
+    remains the legacy fallback.
+    ``backup_dir`` hosts offline backups created by ``newsforge.db.backup`` (the
+    provider matches the dialect: SQLite snapshots or PostgreSQL ``pg_dump``)."""
 
     path: str | Path = field(default_factory=_default_db_path)
     backup_dir: Path = field(default_factory=_default_backup_dir)
     echo_sql: bool = _env_bool("NEWSFORGE_ECHO_SQL", False)
+    environment: str = field(default_factory=_default_environment)
+
+    @property
+    def is_production(self) -> bool:
+        return self.environment == "production"
+
+    @property
+    def redacted_path(self) -> str:
+        """The DSN/path as it can safely be logged or reported."""
+        return str(redact_dsn(str(self.path)))
+
+
+def validate_production_config(cfg: DatabaseConfig | None = None) -> list[str]:
+    """Return a list of problems that block PRODUCTION startup.
+
+    Only enforced when ``NEWSFORGE_ENVIRONMENT=production`` explicitly; development
+    and test environments are never gated by this check."""
+    cfg = cfg or DatabaseConfig()
+    problems: list[str] = []
+    if not cfg.is_production:
+        return problems
+    if isinstance(cfg.path, Path) or not str(cfg.path).startswith(("postgresql", "postgres")):
+        problems.append("PRODUCTION requires NEWSFORGE_DATABASE_URL (postgresql://…), not a SQLite file path")
+    if not os.getenv("NEWSFORGE_ADMIN_TOKEN"):
+        problems.append("PRODUCTION requires NEWSFORGE_ADMIN_TOKEN")
+    if AiConfig().mock:
+        problems.append("PRODUCTION requires NEWSFORGE_MOCK_AI=false")
+    if ServerConfig().debug:
+        problems.append("PRODUCTION forbids NEWSFORGE_DEBUG=true")
+    site_url = BrandConfig().site_url
+    if not site_url or site_url.startswith("http://localhost"):
+        problems.append("PRODUCTION requires NEWSFORGE_SITE_URL to be a public https URL")
+    return problems
+
+
+def assert_production_safe(cfg: DatabaseConfig | None = None) -> None:
+    """Raise on any production-blocking configuration defect at startup."""
+    problems = validate_production_config(cfg)
+    if problems:
+        raise RuntimeError("Production configuration rejected: " + "; ".join(problems))
 
 
 @dataclass(frozen=True)
