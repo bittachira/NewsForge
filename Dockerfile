@@ -30,8 +30,9 @@ COPY src/ ./src/
 ENV PYTHONPATH=/app/src
 
 # Create data directory for SQLite database (absolute path /data)
-RUN mkdir -p /data && \
-    touch /data/.gitkeep
+RUN mkdir -p /data/backups && \
+    touch /data/.gitkeep && \
+    touch /data/backups/.gitkeep
 
 # Allow the runtime user to read the app and WRITE /data (DB init at startup).
 RUN chown -R newsforge:newsforge /app /data
@@ -39,6 +40,7 @@ RUN chown -R newsforge:newsforge /app /data
 # Set environment from example template (production will override with actual .env)
 COPY .env.example .env
 ENV NEWSFORGE_DB_PATH=/data/newsforge.db
+ENV NEWSFORGE_BACKUP_DIR=/data/backups
 
 USER newsforge
 

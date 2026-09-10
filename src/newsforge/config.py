@@ -35,12 +35,41 @@ class BrandConfig:
         return self.name.lower()
 
 
+# Anchors resolved at import time against the source root (NOT the process cwd), so the
+# default DB/backup locations are deterministic on any machine/container regardless of
+# where uvicorn/pytest is launched from (§9 persistence hardening). Set an absolute path
+# via env to override (the container uses NEWSFORGE_DB_PATH=/data/newsforge.db).
+_SOURCE_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _resolve_data_path(raw: str) -> Path:
+    p = Path(raw).expanduser()
+    if p.is_absolute():
+        return p
+    return (_SOURCE_ROOT / p).resolve()
+
+
+def _default_db_path() -> str | Path:
+    raw = os.getenv("NEWSFORGE_DB_PATH", "data/newsforge.db")
+    if isinstance(raw, str) and raw.startswith(("postgresql", "postgres", "mysql", "mariadb")):
+        return raw  # DSN passthrough (dialect swap) MUST NOT be coerced to a Path
+    return _resolve_data_path(raw)
+
+
+def _default_backup_dir() -> Path:
+    return _resolve_data_path(os.getenv("NEWSFORGE_BACKUP_DIR", "data/backups"))
+
+
 @dataclass(frozen=True)
 class DatabaseConfig:
-    """SQLite-first; swap the SQLAlchemy dialect to reach PostgreSQL later."""
+    """SQLite-first; swap the SQLAlchemy dialect to reach PostgreSQL later.
 
-    path: Path = field(default_factory=lambda: Path(
-        os.getenv("NEWSFORGE_DB_PATH", "data/newsforge.db")))
+    ``path`` is either a filesystem path (resolved deterministically) or a full
+    DSN string (``postgresql://…``) passed through to SQLAlchemy verbatim.
+    ``backup_dir`` hosts offline SQLite backups created by ``newsforge.db.backup``."""
+
+    path: str | Path = field(default_factory=_default_db_path)
+    backup_dir: Path = field(default_factory=_default_backup_dir)
     echo_sql: bool = _env_bool("NEWSFORGE_ECHO_SQL", False)
 
 

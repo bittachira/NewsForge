@@ -76,8 +76,13 @@ caller. The container runs as a non-root user; `/data` is owned by that user.
 
 - **Path**: `/data/newsforge.db` (inside container)
 - **Persistence**: Mounted volume at `/data`
-- **Initialization**: Automatic on first request
-- **Migration**: None required (schema created via ORM)
+- **Initialization**: Automatic on first request (schema created + schema-version boundary checked)
+- **Migration**: None required (schema created via ORM; `SCHEMA_VERSION` boundary in place)
+- **Backups**: offline consistent SQLite copies to `/data/backups` via `NEWSFORGE_BACKUP_DIR`
+
+See `PERSISTENCE.md` (repository root) for: what must persist (`/data`), WAL semantics,
+the offline backup/restore procedure, the schema-version boundary, and the PostgreSQL
+readiness status.
 
 ### Volume Mount Example
 
@@ -265,6 +270,7 @@ Once staging is verified and stable:
 ## References
 
 - Main MVP Documentation: `DEPLOYMENT.md`
+- Persistence Reference: `PERSISTENCE.md`
 - Environment Template: `.env.example`
 - Dockerfile: `Dockerfile`
 - Start Script: `start.py`

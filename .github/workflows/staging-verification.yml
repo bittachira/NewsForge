@@ -151,6 +151,30 @@ jobs:
             exit 1
           fi
         
+      - name: Verify persistence across restart
+        run: |
+          echo "Verifying data survives a container restart..."
+          IMAGE_REF="${{ env.DOCKER_IMAGE }}:${{ env.DOCKER_TAG }}"
+          VOLUME="newsforge-persist-vol"
+
+          # Mount the probe script (the image only ships src/); PYTHONPATH=/app/src
+          # is baked into the image so `newsforge.*` imports resolve.
+          mount_args=(
+            --volume "${VOLUME}:/data"
+            --volume "$GITHUB_WORKSPACE/scripts:/scripts:ro"
+            -e NEWSFORGE_DB_PATH=/data/newsforge.db
+            -e NEWSFORGE_MOCK_AI=true
+            --entrypoint python
+          )
+
+          # First run (fresh named volume): initialize schema and write a probe row.
+          docker run --rm "${mount_args[@]}" "${IMAGE_REF}" /scripts/persistence_probe.py write || exit 1
+
+          # Second run (brand-new container, SAME volume): the row must still exist.
+          docker run --rm "${mount_args[@]}" "${IMAGE_REF}" /scripts/persistence_probe.py read || exit 1
+
+          echo "Persistence across restart verified (volume ${VOLUME})."
+
       - name: Run pytest test suite in container
         run: |
           echo "Running full test suite inside container..."
@@ -234,7 +258,9 @@ jobs:
       - name: Cleanup
         if: always()
         run: |
-          # Cleanup any running containers from health and smoke tests
+          # Cleanup any running containers from health, smoke and persistence tests
           docker rm -f newsforge-health-test-* 2>/dev/null || true
           docker rm -f newsforge-smoke-test-* 2>/dev/null || true
+          docker rm -f newsforge-persistence-* 2>/dev/null || true
+          docker volume rm -f newsforge-persist-vol 2>/dev/null || true
           echo "Cleanup complete"

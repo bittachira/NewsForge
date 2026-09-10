@@ -14,6 +14,13 @@ from newsforge.db.session import (  # noqa: F401
     build_engine, get_session_factory, set_session_factory, switch_default_database,
     use_isolated_database, use_isolated_database_ctx, get_session, init_db,
 )
+from newsforge.db.backup import (  # noqa: F401
+    backup_database, restore_database, BackupError,
+)
+from newsforge.db.schema import (  # noqa: F401
+    SCHEMA_VERSION, SchemaIncompatibleError, ensure_schema_compatible,
+    ensure_schema_version, validate_column_drift,
+)
 
 __all__ = [
     "Base",
@@ -32,4 +39,8 @@ __all__ = [
     "build_engine", "get_session_factory", "set_session_factory",
     "switch_default_database", "use_isolated_database", "use_isolated_database_ctx",
     "get_session", "init_db",
+    # Persistence (OPS hardening): consistent offline backup/restore + schema boundary
+    "backup_database", "restore_database", "BackupError",
+    "SCHEMA_VERSION", "SchemaIncompatibleError", "ensure_schema_compatible",
+    "ensure_schema_version", "validate_column_drift",
 ]
