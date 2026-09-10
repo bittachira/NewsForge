@@ -28,8 +28,9 @@ jobs:
       - name: Run health check in container
         run: |
           echo "Starting container for health check..."
+          HEALTH_CONTAINER="newsforge-health-test-$(date +%s)"
           docker run -d \
-            --name newsforge-health-test-${RANDOM} \
+            --name "${HEALTH_CONTAINER}" \
             -p 8080:8000 \
             -e NEWSFORGE_DB_PATH=/tmp/staging-data/newsforge.db \
             -e NEWSFORGE_MOCK_AI=true \
@@ -55,17 +56,40 @@ jobs:
             echo "Health check failed after max attempts"
             exit 1
           fi
-          
-          # Cleanup container
-          docker rm -f newsforge-health-test-${RANDOM} || true
         
       - name: Run smoke tests on endpoints
         run: |
           echo "Running endpoint smoke tests..."
-          docker run --rm \
+          SMOKE_CONTAINER="newsforge-smoke-test-$(date +%s)"
+          docker run -d \
+            --name "${SMOKE_CONTAINER}" \
+            -p 8090:8000 \
             -e NEWSFORGE_DB_PATH=/tmp/smoke-data/newsforge.db \
             -e NEWSFORGE_MOCK_AI=true \
-            "${{ env.DOCKER_IMAGE }}:${DOCKER_TAG}}" << 'EOF'
+            "${{ env.DOCKER_IMAGE }}:${DOCKER_TAG}}"
+          
+          # Wait for smoke container to be ready
+          echo "Waiting for smoke test service to become available..."
+          MAX_ATTEMPTS=30
+          ATTEMPT=0
+          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+            HEALTH=$(curl -s http://localhost:8090/health 2>/dev/null || echo "")
+            if echo "$HEALTH" | grep -q '"status": "ok"'; then
+              echo "Smoke test service is ready!"
+              break
+            fi
+            ATTEMPT=$((ATTEMPT + 1))
+            echo "Attempt $ATTEMPT/30, waiting..."
+            sleep 2
+          done
+          
+          if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
+            echo "Smoke test service failed to start"
+            exit 1
+          fi
+          
+          # Run smoke tests against the running container
+          docker exec "${SMOKE_CONTAINER}" python << 'EOF'
 import subprocess
 import sys
 
@@ -97,13 +121,44 @@ for endpoint in ENDPOINTS:
 sys.exit(0 if all_passed else 1)
 EOF
         
+          # Cleanup smoke container after tests
+          docker rm -f "${SMOKE_CONTAINER}" || true
+        
       - name: Run pytest test suite in container
         run: |
           echo "Running full test suite inside container..."
-          docker run --rm \
-            -v /tmp/pytest-cache:/tmp/.pytest_cache \
-            -e PYTHONDONTWRITEBYTECODE=1 \
-            "${{ env.DOCKER_IMAGE }}:${DOCKER_TAG}}" python -m pytest tests/test_p4_generation.py tests/test_p5_publish_seo.py tests/test_p6_analytics.py -v --tb=short || exit 1
+          
+          # Start a container for running tests (need HTTP server for some imports)
+          TEST_CONTAINER="newsforge-test-$(date +%s)"
+          docker run -d \
+            --name "${TEST_CONTAINER}" \
+            -p 8091:8000 \
+            -e NEWSFORGE_DB_PATH=/tmp/test-data/newsforge.db \
+            -e NEWSFORGE_MOCK_AI=true \
+            "${{ env.DOCKER_IMAGE }}:${DOCKER_TAG}}"
+          
+          # Wait for test container to be ready
+          echo "Waiting for test service to become available..."
+          MAX_ATTEMPTS=30
+          ATTEMPT=0
+          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+            HEALTH=$(curl -s http://localhost:8091/health 2>/dev/null || echo "")
+            if echo "$HEALTH" | grep -q '"status": "ok"'; then
+              echo "Test service is ready!"
+              break
+            fi
+            ATTEMPT=$((ATTEMPT + 1))
+            echo "Attempt $ATTEMPT/30, waiting..."
+            sleep 2
+          done
+          
+          if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
+            echo "Test service failed to start"
+            exit 1
+          fi
+          
+          # Run pytest inside the container
+          docker exec "${TEST_CONTAINER}" python -m pytest tests/test_p4_generation.py tests/test_p5_publish_seo.py tests/test_p6_analytics.py -v --tb=short || exit 1
         
       - name: Run regression tests locally (no Docker)
         run: |
@@ -113,11 +168,29 @@ EOF
       - name: Verify image content safety
         run: |
           echo "Checking container image for secrets..."
-          docker inspect "${{ env.DOCKER_IMAGE }}:${DOCKER_TAG}}" --format='{{.Config.Cmd}}' | grep -iE "(python-debug|pip install.*-e|pip install.*git)" || echo "No debug/dev commands found in CMD"
-          docker history "${{ env.DOCKER_IMAGE }}:${DOCKER_TAG}" --no-trunc --filter=created:"0 days ago" | grep -iE "(secret|key|token|password|credential)" || echo "No obvious secrets in recent image layers"
           
+          # Check for debug/dev commands in CMD
+          CMD_OUTPUT=$(docker inspect "${{ env.DOCKER_IMAGE }}:${DOCKER_TAG}}" --format='{{.Config.Cmd}}')
+          if echo "$CMD_OUTPUT" | grep -qiE "(python-debug|pip install.*-e|pip install.*git)"; then
+            echo "✗ Debug/dev commands found in CMD"
+            exit 1
+          else
+            echo "✓ No debug/dev commands in CMD"
+          fi
+          
+          # Check recent image layers for secrets
+          RECENT_LAYERS=$(docker history "${{ env.DOCKER_IMAGE }}:${DOCKER_TAG}}" --no-trunc --filter=created:"0 days ago")
+          if echo "$RECENT_LAYERS" | grep -qiE "(secret|key|token|password|credential)"; then
+            echo "✗ Potential secrets found in recent image layers"
+            exit 1
+          else
+            echo "✓ No obvious secrets in recent image layers"
+          fi
+        
       - name: Cleanup
         run: |
-          # Cleanup any running containers from failed steps
+          # Cleanup any running containers from health and smoke tests
           docker rm -f newsforge-health-test-* 2>/dev/null || true
+          docker rm -f newsforge-smoke-test-* 2>/dev/null || true
+          docker rm -f newsforge-test-* 2>/dev/null || true
           echo "Cleanup complete"
