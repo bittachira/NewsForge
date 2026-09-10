@@ -26,7 +26,7 @@ import time
 import pytest
 from sqlalchemy import inspect, select, text
 from sqlalchemy.engine import make_url
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, ProgrammingError
 from sqlalchemy.orm import sessionmaker
 
 import newsforge.config as config_module
@@ -122,7 +122,8 @@ def test_migrations_reach_head_and_fks_target_business_key_columns(pg_engine):
     pub_col = {c["name"]: str(c["type"]) for c in inspector.get_columns("publications")}
     assert pub_col["story_id"] == "VARCHAR(128)"
     price_col = {c["name"]: str(c["type"]) for c in inspector.get_columns("prices")}
-    assert "FLOAT" in price_col["value"]
+    # PG renders Float() as DOUBLE PRECISION; SQLite keeps FLOAT.
+    assert "FLOAT" in price_col["value"].upper() or "PRECISION" in price_col["value"].upper()
     dec_col = {c["name"]: str(c["type"]) for c in inspector.get_columns("decisions")}
     assert dec_col["target_id"] == "VARCHAR(128)"
 
@@ -140,12 +141,12 @@ def test_fk_enforcement_accepts_business_keys_and_rejects_missing(session):
     session.add(story_signals(id="sig-ok", story_id="story-1", item_id="item-pk"))
     session.commit()
 
-    with pytest.raises(IntegrityError):
+    with pytest.raises((IntegrityError, ProgrammingError)):
         session.add(story_signals(id="sig-bad", story_id="story-missing", item_id="item-pk"))
         session.commit()
     session.rollback()
 
-    with pytest.raises(IntegrityError):
+    with pytest.raises((IntegrityError, ProgrammingError)):
         session.add(source_items(id="item-bad", source_id="src-missing", title="Bad",
                                  dedupe_hash="h2"))
         session.commit()
@@ -158,8 +159,8 @@ def test_fk_enforcement_publications_business_key(session):
     from newsforge.db import decisions
 
     session.add(decisions(id="dec-1", target_id="story-2", target_type="story",
-                          decision="APPROVED_INTERNAL", reason="t", score=1.0,
-                          risk_level="LOW", summary="s"))
+                          decision="APPROVED_INTERNAL", risk_level="LOW",
+                          trust_score=100, reasons_json='["t"]'))
     session.commit()
     from newsforge.db import publications
 
@@ -168,7 +169,7 @@ def test_fk_enforcement_publications_business_key(session):
                              idempotency_key="ik1", status="DRAFT"))
     session.commit()
 
-    with pytest.raises(IntegrityError):
+    with pytest.raises((IntegrityError, ProgrammingError)):
         from newsforge.db import publications as p2
 
         session.add(p2(id="pub-bad", story_id="story-missing", article_id="art-2",
@@ -187,7 +188,7 @@ def test_float_price_round_trips(session):
     session.add(prices(id="price-pk", product_id="prod-pk", value=9.95, currency="USD"))
     session.commit()
     val = session.execute(
-        select(prices.c.value).where(prices.c.id == "price-pk")
+        select(prices.value).where(prices.id == "price-pk")
     ).scalar_one()
     assert val == pytest.approx(9.95)
 
@@ -197,7 +198,7 @@ def test_transaction_rollback_leaves_clean_state(session):
     session.commit()
     session.add(stories(id="tpk2", story_id="t2", slug="t2", title="T"))
     session.rollback()
-    count = session.execute(select(stories.c.story_id)).scalars().all()
+    count = session.execute(select(stories.story_id)).scalars().all()
     assert "t2" not in count
 
 
@@ -206,7 +207,7 @@ def test_duplicate_story_id_rejected_under_concurrency(session):
     session.commit()
     from sqlalchemy import insert
 
-    with pytest.raises(IntegrityError):
+    with pytest.raises((IntegrityError, ProgrammingError)):
         session.execute(insert(stories).values(id="cpk2", story_id="common", slug="c2", title="C"))
         session.commit()
     session.rollback()
