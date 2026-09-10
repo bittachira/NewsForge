@@ -164,7 +164,7 @@ def test_fk_enforcement_publications_business_key(session):
     session.commit()
     from newsforge.db import publications
 
-    session.add(publications(id="pub-1", story_id="story-2", article_id="art-1",
+    session.add(publications(id="pub-1", story_id="story-2",
                              decision_id="dec-1", destination_key="internal",
                              idempotency_key="ik1", status="DRAFT"))
     session.commit()
@@ -172,7 +172,7 @@ def test_fk_enforcement_publications_business_key(session):
     with pytest.raises((IntegrityError, ProgrammingError)):
         from newsforge.db import publications as p2
 
-        session.add(p2(id="pub-bad", story_id="story-missing", article_id="art-2",
+        session.add(p2(id="pub-bad", story_id="story-missing",
                        decision_id="dec-1", destination_key="internal",
                        idempotency_key="ik2", status="DRAFT"))
         session.commit()
