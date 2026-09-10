@@ -20,9 +20,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY src/ ./src/
 
-# Create data directory for SQLite database (must be outside container filesystem in production)
+# Create data directories for SQLite database
 RUN mkdir -p /app/data && \
-    touch /app/data/.gitkeep  # Placeholder to keep volume mounted
+    touch /app/data/.gitkeep && \
+    mkdir -p /tmp/staging-data && \
+    touch /tmp/staging-data/.gitkeep  # Placeholder to keep volume mounted
 
 # Set environment from example template (production will override with actual .env)
 COPY .env.example .env

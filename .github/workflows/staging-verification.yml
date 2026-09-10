@@ -34,7 +34,7 @@ jobs:
           IMAGE_REF="${{ env.DOCKER_IMAGE }}:${{ env.DOCKER_TAG }}"
           docker run -d --name "${HEALTH_CONTAINER}" \
             -p 8080:8000 \
-            -e NEWSFORGE_DB_PATH=/tmp/staging-data/newsforge.db \
+            -e NEWSFORGE_DB_PATH=/data/newsforge.db \
             -e NEWSFORGE_MOCK_AI=true \
             "${IMAGE_REF}" || exit 1
           
@@ -66,7 +66,7 @@ jobs:
           IMAGE_REF="${{ env.DOCKER_IMAGE }}:${{ env.DOCKER_TAG }}"
           docker run -d --name "${SMOKE_CONTAINER}" \
             -p 8090:8000 \
-            -e NEWSFORGE_DB_PATH=/tmp/smoke-data/newsforge.db \
+            -e NEWSFORGE_DB_PATH=/data/newsforge.db \
             -e NEWSFORGE_MOCK_AI=true \
             "${IMAGE_REF}" || exit 1
           
