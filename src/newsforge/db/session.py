@@ -134,7 +134,11 @@ def get_session() -> Iterator[Session]:
 
 
 def init_db(engine: create_engine | None = None) -> None:
-    """Create all tables. Idempotent — safe to call on every startup."""
-    engine = engine or build_engine()
+    """Create all tables. Idempotent — safe to call on every startup.
+
+    Defaults to the shared engine (the one ``get_session``/routes use) so the
+    schema is always created on the database that serves requests — even when
+    tests swapped in an isolated database."""
+    engine = engine or _ensure_shared()[0]
     Base.metadata.create_all(bind=engine)
     logger.info("Database schema ready.")

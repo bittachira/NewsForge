@@ -16,6 +16,7 @@ Routes:
 """
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 from sqlalchemy import text
@@ -26,7 +27,7 @@ from fastapi.templating import Jinja2Templates
 
 from newsforge.analytics import content_roi_query, total_ai_cost
 from newsforge.config import BrandConfig
-from newsforge.db import generated_artifacts, get_session, publications, stories
+from newsforge.db import get_session, init_db, generated_artifacts, publications, stories
 from newsforge.db.models import PublicationStatus, from_jsonable
 from newsforge.seo.feeds import render_rss_xml, render_sitemap_xml
 from newsforge.seo.meta import (
@@ -119,7 +120,13 @@ def _article_view(session, slug: str) -> Optional[dict]:
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="NewsForge Web")
+    @asynccontextmanager
+    async def _lifespan(app: FastAPI):
+        # Ensure the SQLite schema exists before serving (fresh /data volume).
+        init_db()
+        yield
+
+    app = FastAPI(title="NewsForge Web", lifespan=_lifespan)
     templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
     brand = BrandConfig()
 
