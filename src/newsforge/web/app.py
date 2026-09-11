@@ -16,6 +16,7 @@ Routes:
   GET /sitemap.xml       -> sitemap of published article URLs
   GET /feed.xml          -> RSS 2.0 feed of published articles
   GET /analytics         -> INTERNAL BI dashboard (requires NEWSFORGE_ADMIN_TOKEN)
+  POST /admin/pipeline/run -> INTERNAL admin trigger of the real P1-P6 pipeline
 
 Security (OPS hardening): FastAPI auto-docs (/docs, /redoc, /openapi.json) are disabled;
 the analytics/BI + /metrics routes are gated by an admin token and fail closed; /health,
@@ -30,10 +31,10 @@ import hmac
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 from sqlalchemy import text
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.templating import Jinja2Templates
 
@@ -53,6 +54,7 @@ from newsforge.seo.meta import (
     twitter_card_tags,
 )
 from newsforge.web.middleware import install_request_id_middleware
+from newsforge.web.pipeline_trigger import run_pipeline_http, validate_payload
 
 logger = get_logger("web.app")
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
@@ -288,6 +290,28 @@ def create_app() -> FastAPI:
         return JSONResponse(
             content={"metrics": metrics().snapshot(), "build": get_build_info()}
         )
+
+    @app.post("/admin/pipeline/run")
+    async def admin_pipeline_run(request: Request, payload: Any = Body(default=None)):
+        """INTERNAL admin trigger of the real P1-P6 pipeline (POST only).
+
+        Guarded by the SAME fail-closed admin-token gate as /analytics and
+        /metrics. Body is OPTIONAL and restricted to ``{"source_id": ...}``
+        (an existing ``sources`` row) — any other shape is rejected with 400,
+        and no arbitrary signals/URLs/commands are ever accepted. The REAL
+        run_pipeline runs with the configured AiRouter from env; MOCK cannot be
+        active in production, so AI/DB/ingest failures are reported explicitly
+        (never a silent MOCK fallback). Heavy work runs in a worker thread
+        because P1 ingestion needs ``asyncio``."""
+        if not _internal_allowed(request):
+            raise HTTPException(status_code=403, detail="forbidden")
+        from starlette.concurrency import run_in_threadpool
+
+        try:
+            source_id = validate_payload(payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return await run_in_threadpool(run_pipeline_http, source_id)
 
     return app
 
