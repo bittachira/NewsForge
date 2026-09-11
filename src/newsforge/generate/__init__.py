@@ -13,9 +13,11 @@ Public API: :class:`Generator`, :class:`DeterministicGenerator`, :class:`Generat
 from __future__ import annotations
 
 from .generator import (
+    AI_GENERATOR_VERSION,
     GENERATOR_VERSION,
     MODEL_NAME,
     TEMPLATE_VERSION,
+    AiGenerator,
     DeterministicGenerator,
     GeneratedContent,
     Generator,
@@ -30,10 +32,12 @@ from .assembly import (
 
 __all__ = [
     "GENERATOR_VERSION",
+    "AI_GENERATOR_VERSION",
     "TEMPLATE_VERSION",
     "MODEL_NAME",
     "Generator",
     "DeterministicGenerator",
+    "AiGenerator",
     "GeneratedContent",
     "assemble_editorial_artifact",
     "derive_artifact_id",

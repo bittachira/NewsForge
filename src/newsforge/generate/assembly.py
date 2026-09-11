@@ -35,6 +35,7 @@ from newsforge.ai.router import AiRouter, record_generation_job
 from newsforge.verify.persist import is_auto_publishable
 
 from .generator import (
+    AI_GENERATOR_VERSION,
     GENERATOR_VERSION,
     MODEL_NAME,
     TEMPLATE_VERSION,
@@ -236,6 +237,116 @@ def _ai_output_text(content) -> str:
     parts = [str(content.title or ""), str(content.summary or "")]
     parts.extend(str(s.get("text", "")) for s in sections)
     return "\n".join(parts)
+
+
+# --------------------------------------------------------------------------- #
+# AI output parsing (LLM text -> GeneratedContent)
+# --------------------------------------------------------------------------- #
+def _word_set(text: str) -> set:
+    """Lowercase word tokens for similarity matching."""
+    return set((text or "").lower().split())
+
+
+def _best_claim_match(fact_text: str, claims_with_evidence: list) -> dict | None:
+    """Find the claim with the highest word-overlap against *fact_text*.
+
+    Returns the claim dict when overlap exceeds 40 % of the claim's words, else None.
+    This is intentionally simple — the LLM is prompted to use ONLY the provided claims,
+    so the overlap is typically high. The validator catches any mismatch downstream."""
+    if not fact_text or not claims_with_evidence:
+        return None
+    fact_words = _word_set(fact_text)
+    if not fact_words:
+        return None
+    best, best_score = None, 0.0
+    for c in claims_with_evidence:
+        claim_words = _word_set(c.get("text", ""))
+        if not claim_words:
+            continue
+        overlap = len(fact_words & claim_words) / max(len(claim_words), 1)
+        if overlap > best_score:
+            best_score = overlap
+            best = c
+    return best if best_score >= 0.4 else None
+
+
+def _parse_ai_output(
+    text: str,
+    story: dict,
+    claims: list,
+    format: str,
+    *,
+    reference_time: str | None = None,
+    generator_version: str = AI_GENERATOR_VERSION,
+    template_version: str = TEMPLATE_VERSION,
+    model_name: str = "unknown",
+) -> "GeneratedContent":
+    """Parse raw LLM completion text into a :class:`GeneratedContent`.
+
+    Expected LLM format (per ``_SYSTEM_PROMPT``): title on the first line, summary
+    on the second, then one fact per line.  Each fact is matched against the supplied
+    claims (which should all have evidence) by word overlap.  Matched claims become
+    ``claim_refs``; unmatched claims and claims without evidence go to
+    ``excluded_claims``."""
+    from .generator import GeneratedContent
+
+    lines = [l.strip() for l in (text or "").splitlines() if l.strip()]
+
+    if len(lines) >= 2:
+        title = lines[0]
+        summary = lines[1]
+        fact_lines = lines[2:]
+    elif len(lines) == 1:
+        title = lines[0]
+        summary = lines[0]
+        fact_lines = []
+    else:
+        title = _base_title(story)
+        summary = (story.get("summary") or "").strip() or title
+        fact_lines = []
+
+    claims_with_evidence = [c for c in claims if c.get("has_evidence")]
+    claims_without_evidence = [c for c in claims if not c.get("has_evidence")]
+
+    matched_ids: set = set()
+    sections: list = [{"type": "intro", "text": summary}]
+
+    for fl in fact_lines:
+        match = _best_claim_match(fl, claims_with_evidence)
+        if match is not None:
+            matched_ids.add(match["claim_id"])
+            sections.append({"type": "fact", "claim_id": match["claim_id"], "text": fl})
+        else:
+            sections.append({"type": "fact", "text": fl})
+
+    excluded = [
+        {"claim_id": c["claim_id"], "text": c["text"], "reason": "insufficient_evidence"}
+        for c in claims_without_evidence
+    ]
+    for c in claims_with_evidence:
+        if c["claim_id"] not in matched_ids:
+            excluded.append({
+                "claim_id": c["claim_id"], "text": c["text"],
+                "reason": "not_referenced_by_llm",
+            })
+
+    body_json = {
+        "format": format,
+        "reference_time": reference_time,
+        "sections": sections,
+    }
+
+    return GeneratedContent(
+        title=title,
+        summary=summary,
+        body_json=body_json,
+        claim_refs=sorted(matched_ids),
+        excluded_claims=excluded,
+        deterministic=False,
+        generator_version=generator_version,
+        template_version=template_version,
+        model_name=model_name,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -447,15 +558,26 @@ def generate_story(session, *, story_id: str, format: str = ArtifactFormat.ARTIC
        ONE ``ai_jobs`` row per logical generation (idempotent by run_id == artifact_id).
     5. Persists idempotently by ``artifact_id`` with a SINGLE commit at the end.
 
-    When ``ai_router`` is None, the default :class:`AiRouter` is used — MOCK mode per
-    :class:`newsforge.config.AiConfig` (offline, deterministic).
+    Generator selection (in priority order):
+    * Explicit ``generator`` parameter (for testing/injection).
+    * ``AiGenerator`` when ``ai_router`` is provided with ``mock=False`` — calls the real
+      provider via :meth:`AiRouter.generate`; provider failures propagate as
+      :class:`newsforge.ai.router.ProviderError` (no silent fallback to MOCK).
+    * ``DeterministicGenerator`` when ``ai_router`` is None or ``mock=True`` — fully
+      offline, deterministic, no network.
 
     ``publishable`` is derived only: valid AND persisted decision exists AND
     :func:`is_auto_publishable` — it never replaces the publisher's gate (§11)."""
     fmt = str(format)
     if fmt not in _FORMAT_VALUES:
         raise ValueError(f"unknown artifact format: {fmt!r}")
-    gen = generator or DeterministicGenerator()
+    if generator is not None:
+        gen = generator
+    elif ai_router is not None and not ai_router.config.mock:
+        from .generator import AiGenerator
+        gen = AiGenerator(router=ai_router)
+    else:
+        gen = DeterministicGenerator()
     effective_time = reference_time if reference_time is not None else ts()
 
     story_row = session.query(stories).filter(

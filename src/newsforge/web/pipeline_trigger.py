@@ -148,6 +148,23 @@ def run_pipeline_http(source_id: str | None) -> JSONResponse:
         else:
             ids = _all_item_ids()
 
+        if not ids:
+            log_event(
+                logger, "pipeline_trigger_no_items", request_id=rid, source_id=source_id,
+            )
+            return JSONResponse(
+                content={
+                    "status": "no-items",
+                    "request_id": rid,
+                    "source_id": source_id,
+                    "stories_detected": 0,
+                    "stories_processed": 0,
+                    "published": 0,
+                    "ai": ai,
+                    "outcomes": [],
+                }
+            )
+
         result = run_pipeline(signal_ids=ids, ai_router=router)
         outcomes = [_outcome_view(o) for o in result["outcomes"]]
         published = sum(1 for o in outcomes if o["final_status"] == "PUBLISHED")

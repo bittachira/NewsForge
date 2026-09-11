@@ -97,11 +97,11 @@ def test_trigger_requires_correct_admin_token(monkeypatch):
             ok_header = client.post(
                 "/admin/pipeline/run", headers=_admin_headers())
             assert ok_header.status_code == 200
-            assert ok_header.json()["status"] == "ok"
+            assert ok_header.json()["status"] in ("ok", "no-items")
             ok_query = client.post(
                 "/admin/pipeline/run", params={"token": "ci-admin-token"})
             assert ok_query.status_code == 200
-            assert ok_query.json()["status"] == "ok"
+            assert ok_query.json()["status"] in ("ok", "no-items")
 
 
 # --------------------------------------------------------------------------- #
@@ -162,6 +162,48 @@ def test_resolve_source_builds_ingest_spec(monkeypatch):
     assert spec["type"] == "RSS"
 
 
+def test_trigger_empty_db_returns_no_items(monkeypatch):
+    """An empty database yields an explicit 'no-items' status, never 'ok'/'published'."""
+    monkeypatch.setenv("NEWSFORGE_ADMIN_TOKEN", "ci-admin-token")
+    ctx, client = _isolated_client("noitems")
+    with ctx:
+        with client:
+            r = client.post("/admin/pipeline/run", headers=_admin_headers())
+            assert r.status_code == 200
+            body = r.json()
+            assert body["status"] == "no-items"
+            assert body["stories_detected"] == 0
+            assert body["stories_processed"] == 0
+            assert body["published"] == 0
+            assert body["outcomes"] == []
+
+            with get_session() as s:
+                assert s.query(publications).count() == 0
+
+
+def test_trigger_source_without_items_returns_no_items(monkeypatch):
+    """A registered source with no ingested items yields 'no-items' per source."""
+    monkeypatch.setenv("NEWSFORGE_ADMIN_TOKEN", "ci-admin-token")
+
+    async def _no_op_ingest(source):  # no network: nothing is ingested
+        return type("IngestResult", (), {"errors": []})()
+
+    monkeypatch.setattr(pipeline_trigger, "ingest_source", _no_op_ingest)
+    ctx, client = _isolated_client("src-noitems")
+    with ctx:
+        with client:
+            with get_session() as s:
+                _seed_source(s, sid="src-empty-items")
+            r = client.post(
+                "/admin/pipeline/run",
+                json={"source_id": "src-empty-items"},
+                headers=_admin_headers())
+            assert r.status_code == 200
+            body = r.json()
+            assert body["status"] == "no-items"
+            assert body["source_id"] == "src-empty-items"
+
+
 # --------------------------------------------------------------------------- #
 # Execution (real run_pipeline over persisted items, no network)
 # --------------------------------------------------------------------------- #
@@ -218,9 +260,10 @@ def test_trigger_repeat_is_idempotent(monkeypatch):
 
 
 def test_trigger_real_provider_no_mock_fallback(monkeypatch):
-    """When the router is configured for a real provider the pipeline still
-    completes (content generation is deterministic/offline), but the ai_job
-    metadata records the REAL provider — never mock."""
+    """mock=False + a real provider that fails: content generation actually calls the
+    provider (no DeterministicGenerator shortcut), the story outcome is an explicit
+    FAILED carrying the ProviderError — NEVER a silent fallback to MOCK — and nothing
+    is published nor charged (no ai_job is recorded for a failed generation)."""
     monkeypatch.setenv("NEWSFORGE_ADMIN_TOKEN", "ci-admin-token")
     real_router = AiRouter(config=replace(
         AiConfig(),
@@ -248,19 +291,20 @@ def test_trigger_real_provider_no_mock_fallback(monkeypatch):
             assert body["ai"]["mock"] is False
             assert body["ai"]["provider"] == "lm_studio"
             assert body["ai"]["model"] == "test-model"
-            published = [o for o in body["outcomes"]
-                         if o["final_status"] == "PUBLISHED"]
-            assert published, body
+            # The dead provider was actually called -> the story FAILED explicitly,
+            # carrying the provider error. No silent fallback to deterministic/MOCK.
+            failed = [o for o in body["outcomes"]
+                      if o["final_status"] == "FAILED"]
+            assert failed, body
+            assert "ProviderError" in failed[0]["error"]
 
-            # ai_job metadata records the real provider, not mock.
+            # No AI job is recorded: generation failed BEFORE cost recording, so no
+            # cost/token row exists for the failed run (no generation -> no charge).
             with get_session() as s:
                 from newsforge.db import ai_jobs
-                job = s.query(ai_jobs).order_by(ai_jobs.created_at.desc()).first()
-                assert job is not None
-                assert job.model_provider == "lm_studio"
-                assert job.model_name == "test-model"
+                assert s.query(ai_jobs).count() == 0
                 assert s.query(publications).filter_by(
-                    status=PublicationStatus.COMPLETED.value).count() >= 1
+                    status=PublicationStatus.COMPLETED.value).count() == 0
 
 
 # --------------------------------------------------------------------------- #
