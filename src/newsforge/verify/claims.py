@@ -13,12 +13,10 @@ same verification state, confidence and provenance. No randomness, no "now" leak
 from __future__ import annotations
 
 import hashlib
-
-import uuid
-
-import uuid
+import re
 
 from newsforge.db.models import ClaimStatus
+from newsforge.stories.detector import significant_tokens
 
 
 def build_claim(
@@ -53,6 +51,67 @@ def build_claim(
         "confidence": 0,
         "status": ClaimStatus.UNVERIFIED.value,
     }
+
+
+_CAPWORD_RE = re.compile(r"\b([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*)")
+
+
+# A single capitalized proper noun alone is a weak event signal: two stories that
+# merely name the same company (e.g. "Apple") would wrongly merge. We therefore
+# require at least one shared significant token alongside it, which the shared name
+# itself provides. Multi-word proper nouns ("Central Bank") are stronger and match
+# directly. Without any shared proper noun, an event match needs at least this many
+# shared significant tokens so two generic tech/economy stories never merge.
+_SINGLE_CAP_MIN_TOKENS = 1
+_NO_ENTITY_MIN_TOKENS = 3
+_MULTI_WORD_MIN_PARTS = 2
+
+
+def _capitalized_phrases(text: str | None) -> set[str]:
+    """Proper-noun phrases in ``text``, excluding ALL-CAPS acronyms (AI/UK/EU/...)."""
+    if not text:
+        return set()
+    return {
+        " ".join(p.split())
+        for p in _CAPWORD_RE.findall(text)
+        if any(ch.islower() for ch in p)
+    }
+
+
+def evidence_matches(subject_text: str | None, candidate_text: str | None) -> bool:
+    """Deterministic predicate: does ``candidate_text`` support the same claim as ``subject_text``?
+
+    Cross-source items only corroborate each other when they describe the SAME event.
+    The signal reuses the story detector's normalizer (:func:`significant_tokens`) so
+    evidence linkage is consistent with clustering. A candidate matches when:
+
+    * both texts share a MULTI-WORD proper noun (e.g. ``Central Bank``); or
+    * both share a SINGLE capitalized proper noun AND at least one significant token
+      (the shared name itself counts, so "Anthropic ... bioweapons" corroborates
+      "Anthropic ... biology projects"); or
+    * they share >= 3 significant tokens.
+
+    ALL-CAPS acronyms (``AI``, ``UK``, ``EU``) are ignored as entities. The predicate
+    is symmetric, pure and threshold-based (no LLM). It errs toward under-merge except
+    for single-entity-name matches (two stories merely naming the same company can
+    over-merge) -- the pinned regression guarantees unrelated story members never
+    fabricate corroboration, and the publish gates keep the residual risk on REVIEW.
+    """
+    if not subject_text or not candidate_text:
+        return False
+    stokens = {t.lower() for t in significant_tokens(subject_text)}
+    ctokens = {t.lower() for t in significant_tokens(candidate_text)}
+    shared_tokens = stokens & ctokens
+    sphrases = {p.lower() for p in _capitalized_phrases(subject_text)}
+    cphrases = {p.lower() for p in _capitalized_phrases(candidate_text)}
+    shared_phrases = sphrases & cphrases
+    multi_word = {p for p in shared_phrases if len(p.split()) >= _MULTI_WORD_MIN_PARTS}
+    if multi_word:
+        return True
+    single_word = shared_phrases - multi_word
+    if single_word:
+        return len(shared_tokens) >= _SINGLE_CAP_MIN_TOKENS
+    return len(shared_tokens) >= _NO_ENTITY_MIN_TOKENS
 
 
 def _canonical_identity(text: str, story_id: str | None) -> str:

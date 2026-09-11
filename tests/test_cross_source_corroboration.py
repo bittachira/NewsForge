@@ -215,3 +215,91 @@ def test_corroborated_pipeline_is_idempotent():
         assert s.query(decisions).filter_by(target_id=run1["outcomes"][0].business_key).count() == 1
         # Story handle (UUID pk) is not a decision key column; identity is by business key.
         assert s.query(decisions).count() == 1
+
+
+# --------------------------------------------------------------------------- #
+# Semantic integrity: a cross-source item corroborates ONLY the claims it really
+# supports. Case: BBC + Guardian covering the SAME event must produce two
+# claim_evidence rows per claim and COUNT as 2 distinct sources.
+# --------------------------------------------------------------------------- #
+_BBC_SAME_EVENT = (
+    "Anthropic blocks possible attempt to use AI to make biological weapons"
+)
+_GUARDIAN_SAME_EVENT = (
+    "Anthropic details efforts to misuse its AI for dangerous biology projects"
+)
+
+
+def test_evidence_matches_pure_predicate():
+    from newsforge.verify.claims import evidence_matches
+
+    assert evidence_matches(_BBC_SAME_EVENT, _GUARDIAN_SAME_EVENT)
+    assert not evidence_matches(
+        "UK government rejects kill switch idea for dangerous AI",
+        "Google picks Finland for Europe's largest AI data centre investment",
+    )
+
+
+def test_cross_source_same_event_persists_two_evidence_rows():
+    with get_session() as s:
+        _seed_source(s, id="bbc-tech", tier="TIER_2")
+        _seed_source(s, id="guardian-tech", tier="TIER_2")
+        item_bbc = _seed_item(s, source_id="bbc-tech", title=_BBC_SAME_EVENT)
+        item_gdn = _seed_item(s, source_id="guardian-tech", title=_GUARDIAN_SAME_EVENT)
+
+    result = _run([item_bbc, item_gdn])
+
+    assert result["stories_detected"] == 1, "both sources must cluster into one story"
+    outcome = result["outcomes"][0]
+    bk = outcome.business_key
+
+    with get_session() as s:
+        claim_rows = s.query(db.claims).filter_by(story_id=bk).all()
+        assert len(claim_rows) == 2, "one claim per linked item"
+        for claim in claim_rows:
+            ev_rows = s.query(db.claim_evidence).filter_by(claim_id=str(claim.id)).all()
+            assert len(ev_rows) == 2, "the other source must be persisted as evidence"
+            source_ids = {
+                str(s.get(db.source_items, str(e.source_item_id)).source_id)
+                for e in ev_rows
+            }
+            assert source_ids == {"bbc-tech", "guardian-tech"}, source_ids
+
+    for te in outcome.decision["trust_evaluations"]:
+        assert te["independent_corroboration"] == 2
+        assert te["total_evidence"] == 2
+
+
+# --------------------------------------------------------------------------- #
+# No false corroboration: two items in the SAME story but about DIFFERENT events
+# must each keep exactly one evidence row and never reach the publish bar.
+# --------------------------------------------------------------------------- #
+def test_same_story_unrelated_items_stay_single_source():
+    with get_session() as s:
+        _seed_source(s, id="src-x", tier="TIER_3")
+        _seed_source(s, id="src-y", tier="TIER_3")
+        item_a = _seed_item(
+            s, source_id="src-x",
+            title="UK government rejects kill switch idea for dangerous AI",
+        )
+        item_b = _seed_item(
+            s, source_id="src-y",
+            title="Google picks Finland for Europe's largest AI data centre investment",
+        )
+
+    result = _run([item_a, item_b])
+
+    assert result["stories_detected"] == 1, "both items must share the technology story"
+    outcome = result["outcomes"][0]
+    bk = outcome.business_key
+
+    with get_session() as s:
+        claim_rows = s.query(db.claims).filter_by(story_id=bk).all()
+        assert len(claim_rows) == 2
+        for claim in claim_rows:
+            ev_rows = s.query(db.claim_evidence).filter_by(claim_id=str(claim.id)).all()
+            assert len(ev_rows) == 1, "unrelated items must NOT cross-corroborate"
+
+    for te in outcome.decision["trust_evaluations"]:
+        assert te["independent_corroboration"] == 1
+    assert outcome.final_status != "PUBLISHED"

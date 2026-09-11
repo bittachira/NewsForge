@@ -33,6 +33,7 @@ from newsforge.db import (
     get_session, source_items, sources, stories, story_signals,
 )
 from newsforge.pipeline.context import new_run_context
+from newsforge.verify.claims import evidence_matches
 
 logger = get_logger("pipeline.orchestrator")
 
@@ -104,13 +105,14 @@ def _default_claim_spec_builder(
     truncated to 16 hex chars so re-runs never duplicate claim rows (idempotent by
     UNIQUE constraint).
 
-    Corroboration (G1, section 3): a claim's EVIDENCE is the story's full linked
-    item set — not just the single item it was derived from. Items independently
-    ingested from DIFFERENT sources about the same story therefore register as real
-    cross-source corroboration in the Trust Engine, which counts DISTINCT sources
-    (never article count) so two items from the same outlet still collapse to one
-    independent source. The claim's own item stays first so provenance (claim row
-    ``source_item_id``/URL/date) keeps pointing at its true origin."""
+    Corroboration (G1, section 3): a claim's EVIDENCE is limited to the story items
+    that genuinely support the SAME event as the claim's own item, decided by the
+    deterministic :func:`evidence_matches` predicate. Empty/title-only text and
+    coarse story buckets (topic+year) therefore never fabricate corroboration: two
+    unrelated items inside one story stay single-source, while a BBC item and a
+    Guardian item about the same event each expose the other as evidence. The claim's
+    own item stays first so provenance (claim row ``source_item_id``/URL/date) keeps
+    pointing at its true origin."""
     linked = session.query(story_signals).filter_by(story_id=business_key).all()
     items: list[Any] = []
     for sig in linked:
@@ -126,15 +128,24 @@ def _default_claim_spec_builder(
 
     story_item_ids = [str(it.id) for it in items]
     tiers = sorted({_source_tier(session, it) for it in items})
+    texts = {
+        str(it.id): f"{it.title or ''} {it.description or ''}".strip()
+        for it in items if it is not None
+    }
 
     specs: list[dict] = []
     for item in items:
         text = (item.description or item.title or "").strip()
         if not text:
             continue
-        # Own item first (keeps claim provenance on its true origin), then the rest
-        # of the story's linked items as corroborating evidence.
-        evidence = [str(item.id)] + [i for i in story_item_ids if i != str(item.id)]
+        own_id = str(item.id)
+        subject_text = texts.get(own_id, text)
+        # Own item first (keeps claim provenance on its true origin), then the story's
+        # other items that support the same event, in deterministic id order.
+        evidence = [own_id] + [
+            i for i in story_item_ids
+            if i != own_id and evidence_matches(subject_text, texts.get(i))
+        ]
         claim_id = hashlib.sha256(
             f"{story_handle}|{item.id}|{text}".encode()
         ).hexdigest()[:16]
