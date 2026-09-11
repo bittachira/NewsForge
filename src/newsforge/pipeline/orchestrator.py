@@ -102,18 +102,39 @@ def _default_claim_spec_builder(
     keyed by the STORY BUSINESS KEY (the deterministic cluster key). Tiers are
     resolved from the originating source. The claim_id is a deterministic SHA-256
     truncated to 16 hex chars so re-runs never duplicate claim rows (idempotent by
-    UNIQUE constraint)."""
+    UNIQUE constraint).
+
+    Corroboration (G1, section 3): a claim's EVIDENCE is the story's full linked
+    item set — not just the single item it was derived from. Items independently
+    ingested from DIFFERENT sources about the same story therefore register as real
+    cross-source corroboration in the Trust Engine, which counts DISTINCT sources
+    (never article count) so two items from the same outlet still collapse to one
+    independent source. The claim's own item stays first so provenance (claim row
+    ``source_item_id``/URL/date) keeps pointing at its true origin."""
     linked = session.query(story_signals).filter_by(story_id=business_key).all()
-    specs: list[dict] = []
+    items: list[Any] = []
     for sig in linked:
         item = session.get(source_items, str(sig.item_id))
-        if item is None:
-            continue
+        if item is not None:
+            items.append(item)
+    if not items:
+        return []
+
+    # Deterministic ordering (section 15): evidence sets, tiers and spec order must
+    # not depend on DB insertion order when the pipeline is re-run.
+    items.sort(key=lambda it: str(it.id))
+
+    story_item_ids = [str(it.id) for it in items]
+    tiers = sorted({_source_tier(session, it) for it in items})
+
+    specs: list[dict] = []
+    for item in items:
         text = (item.description or item.title or "").strip()
         if not text:
             continue
-        src = session.get(sources, str(item.source_id)) if item.source_id else None
-        tier = str(src.tier).upper() if src and src.tier else "TIER_3"
+        # Own item first (keeps claim provenance on its true origin), then the rest
+        # of the story's linked items as corroborating evidence.
+        evidence = [str(item.id)] + [i for i in story_item_ids if i != str(item.id)]
         claim_id = hashlib.sha256(
             f"{story_handle}|{item.id}|{text}".encode()
         ).hexdigest()[:16]
@@ -121,11 +142,16 @@ def _default_claim_spec_builder(
             "claim_id": claim_id,
             "text": text,
             "story_id": business_key,
-            "source_item_ids": [str(item.id)],
-            "tiers": [tier],
+            "source_item_ids": evidence,
+            "tiers": tiers,
             "publication_date": getattr(item, "published_at", None),
         })
     return specs
+
+
+def _source_tier(session, item) -> str:
+    src = session.get(sources, str(item.source_id)) if item.source_id else None
+    return str(src.tier).upper() if src and src.tier else "TIER_3"
 
 
 # --------------------------------------------------------------------------- #
