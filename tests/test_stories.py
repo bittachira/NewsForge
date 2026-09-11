@@ -285,8 +285,8 @@ def test_regression_story_parent_ordered_before_signals_with_fk():
     assert second.updated_stories == 1
     assert second.linked_signals == 0
     with get_session() as s:
-        assert s.query(stories).count() == 1
-        assert s.query(story_signals).count() == 2
+        assert s.query(stories).filter_by(story_id="september_2026").count() == 1
+        assert s.query(story_signals).filter_by(story_id="september_2026").count() == 2
 
 
 def test_process_requires_input():

@@ -193,21 +193,27 @@ def test_detect_persists_story_before_story_signals_under_pg_fk(pg_dsn):
 
     try:
         with session_mod.use_isolated_database_ctx(pg_dsn):
+            seed_ids = []
             with session_mod.get_session() as s:
                 s.add(sources(source_id="src-sep", name="Source", type="RSS",
                               country="ES", language="es", trust_score=60, status="active"))
                 s.flush()
+                # Collect the ids of the items WE seed: the shared throwaway DB already
+                # holds rows left by previous tests in this module, so a blanket query
+                # would fold their unrelated items into the detection run.
                 for i, (t, d) in enumerate([
                     ("September 2026 report", "september 2026 regional outlook report"),
                     ("September 2026 analysis", "september 2026 briefing for the board"),
                 ]):
-                    s.add(source_items(source_id="src-sep", title=t, description=d,
-                                       dedupe_hash=f"sep-{i}",
-                                       published_at="2026-09-05T10:00:00+00:00"))
+                    it = source_items(source_id="src-sep", title=t, description=d,
+                                      dedupe_hash=f"sep-{i}",
+                                      published_at="2026-09-05T10:00:00+00:00")
+                    s.add(it)
+                    s.flush()
+                    seed_ids.append(str(it.id))
                 s.commit()
-                ids = [str(r[0]) for r in s.query(source_items.id).all()]
 
-            first = StoryDetector().process(signal_ids=ids)
+            first = StoryDetector().process(signal_ids=seed_ids)
             assert first.created_stories == 1
             assert first.linked_signals == 2
             assert first.stories[0]["story_id"] == "september_2026"
@@ -217,11 +223,11 @@ def test_detect_persists_story_before_story_signals_under_pg_fk(pg_dsn):
                 assert s.query(story_signals).filter_by(story_id="september_2026").count() == 2
 
             # Idempotent re-run under the same FK regime: no duplicates.
-            second = StoryDetector().process(signal_ids=ids)
+            second = StoryDetector().process(signal_ids=seed_ids)
             assert second.created_stories == 0
             assert second.updated_stories == 1
             with session_mod.get_session() as s:
-                assert s.query(story_signals).count() == 2
+                assert s.query(story_signals).filter_by(story_id="september_2026").count() == 2
     finally:
         # Never leave the PostgreSQL engine as the shared default.
         if session_mod._default_engine is not None:
