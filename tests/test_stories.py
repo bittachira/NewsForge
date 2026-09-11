@@ -13,6 +13,7 @@ import shutil
 from pathlib import Path
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 import newsforge.db as db
 from newsforge.db import get_session, source_items, stories, story_signals, sources
@@ -178,6 +179,114 @@ def test_related_signals_share_one_story_and_link_count_is_stable():
         assert total_links == 2
         for sid in (a_id, b_id):
             assert _count_links_for_story(s, story.story_id) == 2
+
+
+# --------------------------------------------------------------------------- #
+# Production FK regression — story_signals must never precede its stories row.
+# SQLite leaves foreign keys OFF by design (db/session.py), so these tests opt in
+# to `PRAGMA foreign_keys=ON` and reproduce the exact order PostgreSQL requires.
+# --------------------------------------------------------------------------- #
+def _sqlite_fk_on(dbapi_connection, connection_record):  # noqa: ARG001
+    dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
+
+def _enable_fk_pragma():
+    """Force FK enforcement for the shared engine used by this test.
+
+    SQLite treats FK enforcement as a per-connection setting and the app's connect
+    listener turns it OFF, so (a) register a listener that turns it ON for every
+    future connection, then (b) dispose pooled connections created earlier (e.g. by
+    ``create_all``) so they are replaced by fresh ones that carry the pragma.
+    """
+    import newsforge.db.session as _session_mod
+    from sqlalchemy import event
+
+    engine = _session_mod._default_engine
+    event.listen(engine, "connect", _sqlite_fk_on, once=False)
+    engine.dispose()
+
+
+def test_sqlite_fk_enforcement_is_active_in_regressions():
+    """Guard: prove the regression fixtures really enforce the story FK."""
+    _enable_fk_pragma()
+    with get_session() as s:
+        s.add(sources(source_id="src-fk", name="S", type="RSS", country="ES",
+                      language="es", trust_score=60, status="active"))
+        s.commit()
+    with get_session() as s:
+        item = source_items(source_id="src-fk", title="I", description="d",
+                            dedupe_hash="h-fk")
+        s.add(item)
+        s.commit()
+        with pytest.raises(IntegrityError):
+            s.add(story_signals(story_id="st-missing", item_id=str(item.id)))
+            s.commit()
+        s.rollback()
+
+
+def _seed_item_fk(session, *, title, description,
+                  published_at="2026-09-05T10:00:00+00:00"):
+    """Seed source + item like the ingest phase really does (source first)."""
+    src = sources()
+    src.source_id = f"src-{title}"
+    src.name = "Test Source"
+    src.type = "RSS"
+    src.country = "ES"
+    src.language = "es"
+    src.tier = "TIER_2"
+    src.trust_score = 60
+    src.status = "active"
+    session.add(src)
+    session.commit()
+
+    item = source_items()
+    item.source_id = src.source_id
+    item.title = title
+    item.description = description
+    item.content_html = None
+    item.content_text = description
+    item.published_at = published_at
+    item.dedupe_hash = f"hash-{title}"
+    session.add(item)
+    session.commit()
+    return str(item.id)
+
+
+def test_regression_story_parent_ordered_before_signals_with_fk():
+    """Production DETECT bug: story_signals inserted before its stories row.
+
+    Reproduces the Render crash (``story_signals_story_id_fkey`` with
+    ``story_id='september_2026'``) on SQLite with FK enforcement ON. Two items
+    sharing the capitalized entity "September" + year 2026 resolve to story_id
+    ``september_2026``; the engine must persist the stories row before linking.
+    """
+    _enable_fk_pragma()
+    with get_session() as s:
+        _seed_item_fk(s, title="September 2026 report",
+                      description="september 2026 regional outlook report")
+        _seed_item_fk(s, title="September 2026 analysis",
+                      description="september 2026 briefing for the board")
+    with get_session() as s:
+        ids = [str(r.id) for r in s.query(source_items).all()]
+
+    first = StoryDetector().process(signal_ids=ids)
+    assert first.created_stories == 1
+    assert first.linked_signals == 2
+    assert first.stories[0]["story_id"] == "september_2026"
+
+    # The FK target now exists and both signals are linked, in one transaction.
+    with get_session() as s:
+        story = s.query(stories).filter_by(story_id="september_2026").one()
+        assert len(s.query(story_signals).filter_by(story_id=story.story_id).all()) == 2
+
+    # Idempotent re-run: no duplicate stories/links, never touches the FK.
+    second = StoryDetector().process(signal_ids=ids)
+    assert second.created_stories == 0
+    assert second.updated_stories == 1
+    assert second.linked_signals == 0
+    with get_session() as s:
+        assert s.query(stories).count() == 1
+        assert s.query(story_signals).count() == 2
 
 
 def test_process_requires_input():

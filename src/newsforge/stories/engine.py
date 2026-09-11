@@ -192,7 +192,39 @@ class StoryDetector:
         """Upsert one story and link its items. Returns ``(created, updated, linked)``."""
         existing = session.query(stories).filter_by(story_id=story_id).first()
 
-        # Link items first (idempotent via the unique constraint), counting new links.
+        # Aggregate trust BEFORE any new rows enter the session, so the _item_score
+        # queries never trigger an autoflush that persists a half-built story graph.
+        scores = [self._item_score(item, session) for item in group] or [50.0]
+        trust = round(sum(scores) / len(scores))
+
+        title = self._latest_title(group)
+        topic_slug = self.classify_item(group[0])["topic_slug"] if group else None
+
+        if existing is None:
+            story = stories()
+            story.story_id = story_id
+            story.title = title
+            story.slug = slugify(title) or story_id
+            story.summary = self._summarize(group)
+            story.topic = topic_slug
+            story.status = StoryStatus.ACTIVE.value
+            story.trust_score = trust
+            session.add(story)
+            # Persist the parent row FIRST so a query-invoked autoflush can never
+            # insert a story_signals row before its referenced stories.story_id
+            # exists (PostgreSQL always enforces this FK; see the DETECT regression).
+            session.flush()
+            created, updated = True, False
+        else:
+            existing.title = title or existing.title
+            existing.slug = slugify(title) or existing.slug or story_id
+            existing.summary = self._summarize(group) or existing.summary
+            existing.topic = topic_slug
+            existing.trust_score = trust
+            created, updated = False, True
+
+        # Link items now — the stories row is guaranteed to exist (flushed for new
+        # stories), so the idempotent dedup query can flush pending links safely.
         already_linked = {str(s.item_id) for s in session.query(story_signals).filter_by(story_id=story_id).all()}
         linked = 0
         for item in group:
@@ -204,34 +236,7 @@ class StoryDetector:
                 already_linked.add(iid)
                 linked += 1
 
-        # Aggregate trust from contributing items' source tiers (§9 MVP proxy).
-        scores = [self._item_score(item, session) for item in group] or [50.0]
-        trust = round(sum(scores) / len(scores))
-
-        if existing is None:
-            title = self._latest_title(group)
-            topic_slug = self.classify_item(group[0])["topic_slug"] if group else None
-            story = stories()
-            story.story_id = story_id
-            story.title = title
-            story.slug = slugify(title) or story_id
-            story.summary = self._summarize(group)
-            story.topic = topic_slug
-            story.status = StoryStatus.ACTIVE.value
-            story.trust_score = trust
-            session.add(story)  # UUID pk assigned by the column default
-            return True, False, linked
-
-        # Existing story — refresh metadata + links and recompute trust.
-        title = self._latest_title(group)
-        topic_slug = self.classify_item(group[0])["topic_slug"] if group else None
-        existing.title = title or existing.title
-        existing.slug = slugify(title) or existing.slug or story_id
-        existing.summary = self._summarize(group) or existing.summary
-        existing.topic = topic_slug
-        existing.trust_score = trust
-        session.flush()  # assign the UUID pk so nothing downstream needs it
-        return False, True, linked
+        return created, updated, linked
 
     @staticmethod
     def _latest_title(group: list[dict]) -> str | None:

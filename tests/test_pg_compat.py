@@ -179,6 +179,57 @@ def test_fk_enforcement_publications_business_key(session):
     session.rollback()
 
 
+def test_detect_persists_story_before_story_signals_under_pg_fk(pg_dsn):
+    """Production DETECT regression: story_signals must never precede its stories row.
+
+    Reproduces the exact Render crash (``story_signals_story_id_fkey``,
+    ``story_id='september_2026'``). PostgreSQL ALWAYS enforces FKs, so any
+    query-invoked autoflush that persists signals before their parent story fails
+    here with an IntegrityError. The shared default engine is swapped to PG for
+    the full ``StoryDetector.process`` round-trip, then restored.
+    """
+    import newsforge.db.session as session_mod
+    from newsforge.stories.engine import StoryDetector
+
+    try:
+        with session_mod.use_isolated_database_ctx(pg_dsn):
+            with session_mod.get_session() as s:
+                s.add(sources(source_id="src-sep", name="Source", type="RSS",
+                              country="ES", language="es", trust_score=60, status="active"))
+                s.flush()
+                for i, (t, d) in enumerate([
+                    ("September 2026 report", "september 2026 regional outlook report"),
+                    ("September 2026 analysis", "september 2026 briefing for the board"),
+                ]):
+                    s.add(source_items(source_id="src-sep", title=t, description=d,
+                                       dedupe_hash=f"sep-{i}",
+                                       published_at="2026-09-05T10:00:00+00:00"))
+                s.commit()
+                ids = [str(r[0]) for r in s.query(source_items.id).all()]
+
+            first = StoryDetector().process(signal_ids=ids)
+            assert first.created_stories == 1
+            assert first.linked_signals == 2
+            assert first.stories[0]["story_id"] == "september_2026"
+
+            with session_mod.get_session() as s:
+                assert s.query(stories).filter_by(story_id="september_2026").count() == 1
+                assert s.query(story_signals).filter_by(story_id="september_2026").count() == 2
+
+            # Idempotent re-run under the same FK regime: no duplicates.
+            second = StoryDetector().process(signal_ids=ids)
+            assert second.created_stories == 0
+            assert second.updated_stories == 1
+            with session_mod.get_session() as s:
+                assert s.query(story_signals).count() == 2
+    finally:
+        # Never leave the PostgreSQL engine as the shared default.
+        if session_mod._default_engine is not None:
+            session_mod._default_engine.dispose()
+        session_mod._default_engine = None
+        session_mod._default_factory = None
+
+
 # --------------------------------------------------------------------------- #
 # Numeric widths + round-trip, rollback, uniqueness
 # --------------------------------------------------------------------------- #
