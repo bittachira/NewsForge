@@ -17,6 +17,7 @@ Routes:
   GET /feed.xml          -> RSS 2.0 feed of published articles
   GET /analytics         -> INTERNAL BI dashboard (requires NEWSFORGE_ADMIN_TOKEN)
   POST /admin/pipeline/run -> INTERNAL admin trigger of the real P1-P6 pipeline
+  POST /admin/sources/register -> INTERNAL admin registration of ONE news source
 
 Security (OPS hardening): FastAPI auto-docs (/docs, /redoc, /openapi.json) are disabled;
 the analytics/BI + /metrics routes are gated by an admin token and fail closed; /health,
@@ -55,6 +56,7 @@ from newsforge.seo.meta import (
 )
 from newsforge.web.middleware import install_request_id_middleware
 from newsforge.web.pipeline_trigger import run_pipeline_http, validate_payload
+from newsforge.web.source_registration import register_source_http
 
 logger = get_logger("web.app")
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
@@ -312,6 +314,25 @@ def create_app() -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return await run_in_threadpool(run_pipeline_http, source_id)
+
+    @app.post("/admin/sources/register")
+    async def admin_register_source(request: Request, payload: Any = Body(default=None)):
+        """INTERNAL admin registration of ONE news source (POST only).
+
+        Guarded by the SAME fail-closed admin-token gate as /analytics and
+        /metrics. Body is REQUIRED and restricted to the source fields
+        (``name/url/source_id/type/tier/country`` plus ``update``/``verify``) —
+        every other key or non-object payload is rejected with 400, and the
+        SSRF/public-target check can never be disabled over HTTP. Creation is
+        delegated to newsforge.cli, so CLI and HTTP share the exact same
+        validation. Adds no arbitrary data: only one ``sources`` row may be
+        created/updated. With ``verify=true`` the normal SSRF-guarded ingest
+        engine runs and returns items added/skipped."""
+        if not _internal_allowed(request):
+            raise HTTPException(status_code=403, detail="forbidden")
+        from starlette.concurrency import run_in_threadpool
+
+        return await run_in_threadpool(register_source_http, payload)
 
     return app
 

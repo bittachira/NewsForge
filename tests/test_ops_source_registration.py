@@ -65,6 +65,36 @@ def test_validate_trust_score_bounds():
                         trust_score=101, check_public=False)
 
 
+@pytest.mark.parametrize("bad", ["has space", "../up", "semi;colon",
+                                 "quote'x", "back\\slash", "$var", "a" * 200])
+def test_register_rejects_invalid_source_id(bad):
+    with pytest.raises(CliError, match="source_id"):
+        register_source(name="X", url="https://example.com/rss",
+                        source_id=bad, check_public=False)
+
+
+def test_main_refuses_no_public_check_in_production(monkeypatch, capsys):
+    monkeypatch.setenv("NEWSFORGE_ENVIRONMENT", "production")
+    code = main([
+        "register-source", "--name", "X", "--url", "https://example.com/rss",
+        "--no-public-check",
+    ])
+    assert code == 1
+    out = capsys.readouterr().out
+    assert "SOURCE_REGISTER_FAILED" in out
+    assert "can never be skipped in production" in out
+
+
+def test_main_allows_no_public_check_outside_production(monkeypatch, capsys):
+    monkeypatch.setenv("NEWSFORGE_ENVIRONMENT", "development")
+    code = main([
+        "register-source", "--name", "X", "--url", "https://example.com/rss",
+        "--no-public-check",
+    ])
+    assert code == 0
+    assert "SOURCE_CREATED" in capsys.readouterr().out
+
+
 def test_register_requires_name():
     with pytest.raises(CliError, match="--name is required"):
         register_source(name="   ", url="https://example.com/rss", check_public=False)

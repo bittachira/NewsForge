@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import re
 import sys
 import unicodedata
@@ -38,6 +39,7 @@ from newsforge.sources.engine import ingest_source
 
 SOURCE_ID_DEFAULT = "source-id-auto"
 SCHEME_MSG = "refusing non-http(s) scheme: {scheme!r}"
+SOURCE_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$")
 
 
 class CliError(RuntimeError):
@@ -68,6 +70,21 @@ def _slugify(name: str) -> str:
     ascii_ = "".join(c for c in normalized if not unicodedata.combining(c))
     base = re.sub(r"[^a-z0-9]+", "-", ascii_.lower()).strip("-")
     return base or SOURCE_ID_DEFAULT
+
+
+def _is_production() -> bool:
+    return os.getenv("NEWSFORGE_ENVIRONMENT", "").strip().lower() == "production"
+
+
+def _resolve_source_id(value: str) -> str:
+    """Validate an explicit ```source_id``` (stable, URL/query-safe identifier)."""
+    sid = (value or "").strip()
+    if not SOURCE_ID_RE.match(sid):
+        raise CliError(
+            "source_id must start with a letter or digit and contain only letters, "
+            "digits, '_' or '-' (max 128 chars)"
+        )
+    return sid
 
 
 # --------------------------------------------------------------------------- #
@@ -142,9 +159,7 @@ def register_source(
     if check_public:
         _check_public(url)
 
-    sid = (source_id or _slugify(name)).strip()
-    if not sid:
-        raise CliError("--source-id is required when it cannot be derived from --name")
+    sid = _resolve_source_id(source_id or _slugify(name))
 
     _require_schema()
     factory = get_session_factory()
@@ -257,6 +272,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.no_public_check and _is_production():
+        print(
+            "SOURCE_REGISTER_FAILED refusing --no-public-check under "
+            "NEWSFORGE_ENVIRONMENT=production: the SSRF/public-host check can "
+            "never be skipped in production"
+        )
+        return 1
     try:
         info = register_source(
             name=args.name,
