@@ -261,7 +261,7 @@ _SECRET_PATTERNS = [
 ]
 
 
-@pytest.mark.parametrize("rel", ["Dockerfile", ".env.example", ".env.staging"])
+@pytest.mark.parametrize("rel", ["Dockerfile", ".env.example", ".env.staging", ".env.production.example"])
 def test_no_real_secrets_in_dockerfile_or_env_templates(rel):
     text = Path(rel).read_text(encoding="utf-8")
     for pat in _SECRET_PATTERNS:

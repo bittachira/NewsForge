@@ -230,6 +230,8 @@ def test_production_gate_rejects_sqlite(monkeypatch):
 def test_production_gate_accepts_postgres_dsn_and_redacts(monkeypatch):
     monkeypatch.setenv("NEWSFORGE_ENVIRONMENT", "production")
     monkeypatch.setenv("NEWSFORGE_MOCK_AI", "false")
+    monkeypatch.setenv("NEWSFORGE_DEFAULT_PROVIDER", "openai")
+    monkeypatch.setenv("NEWSFORGE_OPENAI_API_KEY", "sk-probe00000000000000000000")
     monkeypatch.setenv("NEWSFORGE_ADMIN_TOKEN", "sekret")
     monkeypatch.setenv("NEWSFORGE_SITE_URL", "https://newsforge.example")
     problems = config_module.validate_production_config(

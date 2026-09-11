@@ -13,6 +13,9 @@ from newsforge.db.models import (  # noqa: F401
 from newsforge.db.session import (  # noqa: F401
     build_engine, get_session_factory, set_session_factory, switch_default_database,
     use_isolated_database, use_isolated_database_ctx, get_session, init_db,
+    init_production_db, migrate_database, migration_head_revision,
+    on_disk_migration_revision, migration_state, assert_schema_migrated,
+    MigrationIncompatibilityError,
 )
 from newsforge.db.backup import (  # noqa: F401
     backup_database, restore_database, BackupError,
@@ -40,7 +43,9 @@ __all__ = [
     "generated_artifacts", "ArtifactFormat", "GenerationState",
     "build_engine", "get_session_factory", "set_session_factory",
     "switch_default_database", "use_isolated_database", "use_isolated_database_ctx",
-    "get_session", "init_db",
+    "get_session", "init_db", "init_production_db", "migrate_database",
+    "migration_head_revision", "on_disk_migration_revision", "migration_state",
+    "assert_schema_migrated", "MigrationIncompatibilityError",
     # Persistence (OPS hardening): consistent offline backup/restore + schema boundary
     "backup_database", "restore_database", "BackupError",
     "get_backup_provider", "SQLiteBackupProvider", "PostgresBackupProvider",

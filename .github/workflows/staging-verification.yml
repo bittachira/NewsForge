@@ -297,6 +297,13 @@ jobs:
 
           python -m pytest tests/ -q || exit 1
 
+      - name: Validate production configuration gates (offline)
+        run: |
+          # Explicit gate step: the full production fail-fast contract runs
+          # offline (config, secrets, DB/AI/MIGRATION gates, redaction, admin
+          # access, deployment target). No real provider, no live PostgreSQL.
+          python -m pytest tests/test_production_security.py -q --tb=short || exit 1
+
       - name: Run PostgreSQL compatibility suite (staged service)
         run: |
           echo "Running PG compatibility suite against the staged PostgreSQL service..."
@@ -389,6 +396,40 @@ jobs:
             echo "✗ found a .env file in the image"
             exit 1
           fi
+
+      - name: Verify production-style read-only app startup
+        run: |
+          # Production mounts /app read-only; only the DATA volume is writable.
+          # The runtime image must boot and serve /health under --read-only with
+          # a scratch /tmp and a persistent /data volume.
+          RO_CONTAINER="newsforge-readonly-test-$(date +%s)"
+          IMAGE_REF="${{ env.DOCKER_IMAGE }}:${{ env.DOCKER_TAG }}"
+          docker run -d --name "${RO_CONTAINER}" \
+            --read-only --tmpfs /tmp \
+            -p 8082:8000 \
+            -v newsforge-readonly-vol:/data \
+            -e NEWSFORGE_DB_PATH=/data/newsforge.db \
+            -e NEWSFORGE_MOCK_AI=true \
+            -e NEWSFORGE_ADMIN_TOKEN=ci-admin-token \
+            "${IMAGE_REF}" || exit 1
+          MAX_ATTEMPTS=20
+          ATTEMPT=0
+          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+            CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8082/health 2>/dev/null || echo "000")
+            if [ "$CODE" = "200" ]; then
+              echo "✓ production-style read-only startup serves /health (HTTP 200)"
+              docker rm -f "${RO_CONTAINER}" >/dev/null 2>&1 || true
+              docker volume rm -f newsforge-readonly-vol >/dev/null 2>&1 || true
+              exit 0
+            fi
+            ATTEMPT=$((ATTEMPT + 1))
+            sleep 2
+          done
+          echo "✗ read-only startup did not become healthy (HTTP ${CODE})"
+          docker logs "${RO_CONTAINER}" 2>&1 | tail -n 40 || true
+          docker rm -f "${RO_CONTAINER}" >/dev/null 2>&1 || true
+          docker volume rm -f newsforge-readonly-vol >/dev/null 2>&1 || true
+          exit 1
 
       - name: Cleanup
         if: always()

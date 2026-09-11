@@ -83,21 +83,54 @@ _SENSITIVE_VALUE_KEYS = frozenset({
     "cookie", "cookies", "credential", "credentials", "client_secret",
 })
 
-_SECRET_BODY_PATTERNS = [
-    re.compile(r"\bsk-[A-Za-z0-9]{8,}\b"),
-    re.compile(r"\bghp_[A-Za-z0-9]{20,}\b"),
-    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
-    re.compile(r"\bAIza[0-9A-Za-z_\-]{20,}\b"),
-    re.compile(r"\bxox[baprs]-\S+"),
-    re.compile(r"Bearer\s+\S+"),
+# (compiled regex, replacement) pairs applied by :func:`redact_text`. The DSN
+# pattern uses a callable replacement so only the password portion is masked.
+_SECRET_BODY_PATTERNS: list[tuple[re.Pattern, object]] = [
+    (re.compile(r"\bsk-[A-Za-z0-9]{8,}\b"), "[REDACTED]"),
+    (re.compile(r"\bghp_[A-Za-z0-9]{20,}\b"), "[REDACTED]"),
+    (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "[REDACTED]"),
+    (re.compile(r"\bAIza[0-9A-Za-z_\-]{20,}\b"), "[REDACTED]"),
+    (re.compile(r"\bxox[baprs]-\S+"), "[REDACTED]"),
+    (re.compile(r"\bBearer\s+\S+"), "[REDACTED]"),
+    # Generic "key=value"/"key: value" credential assignments (API keys, tokens,
+    # passwords) regardless of provider, so unknown secret shapes are still masked.
+    (re.compile(r"\b(?:api[_-]?key|apikey|access[_-]?token|auth[_-]?token|password|passwd|pwd|secret|client[_-]?secret)\s*[=:]\s*[^\s,;]+", re.IGNORECASE), "[REDACTED]"),
+    # Cookie / Set-Cookie headers: mask the whole value (the header name itself
+    # is harmless).
+    (re.compile(r"\b(?:Cookie|Set-Cookie):\s*[^\r\n]+", re.IGNORECASE), "[REDACTED]"),
+    # PostgreSQL/other DSNs: mask the password portion so a raw DSN in free text
+    # never leaks (scheme://user:****@host).
+    (re.compile(r"([a-zA-Z][a-zA-Z0-9+.-]*://[^:/@\s]+:)[^@\s/]+(@)"),
+     lambda m: m.group(1) + "****" + m.group(2)),
 ]
 
 
+def active_secret_values() -> list[str]:
+    """Current credentials exported by the environment (exact-value redaction).
+
+    Delegates to :mod:`newsforge.config` so the secret list is defined in exactly
+    one place; never raises (redaction is best-effort and must not crash a log
+    line because the config layer misbehaved)."""
+    try:
+        from newsforge.config import _active_secret_values as _collect
+
+        return _collect()
+    except Exception:  # noqa: BLE001 - redaction must never take logging down
+        return []
+
+
 def redact_text(value: str) -> str:
-    """Mask secret-looking token bodies inside free text (defensive redaction)."""
+    """Mask secret-like token bodies inside free text (defensive redaction).
+
+    Applies provider-agnostic format patterns first, then replaces the EXACT
+    values of every currently-configured secret (admin token, API keys) so a
+    secret of an unknown shape is still masked."""
     s = str(value)
-    for pattern in _SECRET_BODY_PATTERNS:
-        s = pattern.sub("[REDACTED]", s)
+    for pattern, repl in _SECRET_BODY_PATTERNS:
+        s = pattern.sub(repl, s)
+    for secret in active_secret_values():
+        if secret in s:
+            s = s.replace(secret, "[REDACTED]")
     return s
 
 

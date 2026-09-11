@@ -10,7 +10,7 @@ from typing import Iterator
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 
-from newsforge.config import DatabaseConfig
+from newsforge.config import DatabaseConfig, assert_production_safe
 from newsforge.core.logger import get_logger
 from newsforge.db.base import Base
 from newsforge.db.schema import ensure_schema_compatible
@@ -19,6 +19,73 @@ logger = get_logger("db.session")
 
 # SQLite durability/concurrency tunables (OPS_HARDENING_PERSISTENCE).
 _SQLITE_BUSY_TIMEOUT_MS = 30_000
+
+
+class MigrationIncompatibilityError(RuntimeError):
+    """The on-disk migration revision is not what this build deploys."""
+
+
+def _alembic_config_for(engine) -> object:
+    """Shared Alembic :class:`~alembic.config.Config` for ``engine``."""
+    from alembic.config import Config
+
+    migrations_dir = Path(__file__).parent / "migrations"
+    cfg = Config(str(migrations_dir / "alembic.ini"))
+    cfg.set_main_option("script_location", str(migrations_dir))
+    cfg.set_main_option(
+        "sqlalchemy.url", engine.url.render_as_string(hide_password=False)
+    )
+    return cfg
+
+
+def migration_head_revision(engine) -> str:
+    """The migration revision this build deploys (from the shipped scripts)."""
+    cfg = _alembic_config_for(engine)
+    from alembic.script import ScriptDirectory
+
+    return ScriptDirectory.from_config(cfg).get_current_head()
+
+
+def on_disk_migration_revision(engine) -> str | None:
+    """The revision recorded in the live DB's ``alembic_version`` table."""
+    from sqlalchemy import inspect as sa_inspect
+
+    tables = set(sa_inspect(engine).get_table_names())
+    if "alembic_version" not in tables:
+        return None
+    with engine.connect() as conn:
+        rows = conn.exec_driver_sql("SELECT version_num FROM alembic_version").fetchall()
+    if not rows:
+        return None
+    return str(rows[0][0])
+
+
+def migration_state(engine) -> dict:
+    """Describe migration state: build head vs on-disk revision (diagnostic)."""
+    return {
+        "head": migration_head_revision(engine),
+        "on_disk": on_disk_migration_revision(engine),
+    }
+
+
+def assert_schema_migrated(engine) -> str:
+    """Migration gate: the DB must be at the head revision this build deploys.
+
+    Raises :class:`SchemaIncompatibleError` (schema boundary) or
+    :class:`MigrationIncompatibilityError` (alembic parity) on mismatch, so a
+    downgraded/out-of-band database can never serve traffic silently."""
+    from newsforge.db.schema import ensure_schema_compatible
+
+    version = ensure_schema_compatible(engine)
+    head = migration_head_revision(engine)
+    on_disk = on_disk_migration_revision(engine)
+    if on_disk != head:
+        raise MigrationIncompatibilityError(
+            f"database revision {on_disk!r} does not match this build's head "
+            f"revision {head!r}; deploy the matching application (or run "
+            f"migrations) before serving traffic"
+        )
+    return version
 
 
 def _apply_sqlite_pragmas(dbapi_connection, connection_record):  # noqa: ARG001 - listener signature
@@ -194,16 +261,8 @@ def _alembic_upgrade(engine) -> None:
     from sqlalchemy import inspect as sa_inspect
 
     from alembic import command
-    from alembic.config import Config
 
-    # The migrations directory ships INSIDE the package so a bare copy of `src`
-    # (the Docker image) can bootstrap the schema without extra assets.
-    migrations_dir = Path(__file__).parent / "migrations"
-    cfg = Config(str(migrations_dir / "alembic.ini"))
-    cfg.set_main_option("script_location", str(migrations_dir))
-    cfg.set_main_option(
-        "sqlalchemy.url", engine.url.render_as_string(hide_password=False)
-    )
+    cfg = _alembic_config_for(engine)
     # Migrations are quiet by default: they inherit the app's structured logging
     # (logger level WARN) so a normal startup produces no migration chatter.
     import logging
@@ -247,3 +306,43 @@ def init_db(engine: create_engine | None = None) -> None:
     _alembic_upgrade(engine)
     version = ensure_schema_compatible(engine)
     logger.info("Database schema ready (schema_version=%s).", version)
+
+
+def init_production_db(engine: create_engine | None = None) -> None:
+    """Production startup path: validate config, connect, migrate, gate, ready.
+
+    Strict order (PRODUCTION_SECRETS_AND_DEPLOYMENT §5/§6):
+
+    1. **Validate configuration** — ``assert_production_safe`` fails fast on any
+       unsafe/default/secret-missing production config (SQLite, MOCK AI, missing
+       admin token, missing DSN, debug, localhost site URL, unset provider).
+    2. **Connect PostgreSQL** — a live ``SELECT 1`` proves the DSN resolves and
+       the server is reachable BEFORE migrations (\"app never silently mutates
+       schema\"); the dialect must be PostgreSQL — SQLite in production is
+       rejected by the config gate BEFORE any connection is made.
+    3. **Apply migrations** — Alembic ``upgrade head`` (never ``create_all``).
+    4. **Migration gate** — the on-disk revision must equal this build's head;
+       the schema boundary refuses newer/older/stale states (fail-fast).
+    5. **Readiness** — the process is only ready to serve after 1-4.
+
+    Never called for development/test/staging; those keep :func:`init_db`."""
+    from sqlalchemy import text
+
+    assert_production_safe()
+    engine = engine or _ensure_shared()[0]
+    if engine.dialect.name != "postgresql":
+        raise MigrationIncompatibilityError(
+            f"production startup requires a PostgreSQL engine, got "
+            f"{engine.dialect.name!r}; NEWSFORGE_DATABASE_URL must be postgresql://…"
+        )
+    with engine.connect() as conn:  # step 2: real connectivity probe
+        conn.execute(text("SELECT 1"))
+    migrate_database(engine)  # step 3: Alembic upgrade head
+    version = assert_schema_migrated(engine)  # step 4: migration gate
+    logger.info("Production database ready (schema_version=%s).", version)
+
+
+def migrate_database(engine: create_engine | None = None) -> None:
+    """Apply Alembic migrations to head. Tests use this too (schema parity)."""
+    engine = engine or _ensure_shared()[0]
+    _alembic_upgrade(engine)

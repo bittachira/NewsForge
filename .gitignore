@@ -12,6 +12,8 @@ env/
 # Environment & secrets — NEVER commit real keys
 .env
 .env.local
+.env.production
+.env.production.local
 secrets.json
 *.key
 

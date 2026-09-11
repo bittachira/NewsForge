@@ -19,7 +19,7 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
-from newsforge.config import AiConfig
+from newsforge.config import AiConfig, assert_mock_not_active_in_production
 from newsforge.core.error_tracker import persist_error
 from newsforge.core.logger import get_logger, log_event, redact_text
 from newsforge.core.metrics import metrics
@@ -49,6 +49,9 @@ class AiRouter:
 
     def __init__(self, config: Optional[AiConfig] = None):
         self.config = config if config is not None else AiConfig()
+        # MOCK must never be active in a production environment (defense in depth;
+        # the startup gate rejects NEWSFORGE_MOCK_AI=true before serving).
+        assert_mock_not_active_in_production(self.config.mock)
 
     def route(self, task_type: str) -> AiRoute:
         """Select the provider/model for a task. Deterministic for fixed config."""

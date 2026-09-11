@@ -21,6 +21,8 @@ import threading
 from collections import OrderedDict
 from typing import Any
 
+from newsforge.core.logger import redact_text
+
 MAX_TAGS = 6
 MAX_TAG_VALUE_LEN = 64
 MAX_HISTORY_SAMPLES = 200
@@ -55,7 +57,10 @@ def _label(series: tuple[str, tuple[tuple[str, str], ...]]) -> str:
     name, tags = series
     if not tags:
         return name
-    body = ",".join(f"{k}={v}" for k, v in tags)
+    # Tag VALUES pass through redaction: a credential must never appear in a
+    # metric label even if a caller misplaced one (defense in depth; nothing in
+    # the codebase intentionally tags with secrets).
+    body = ",".join(f"{k}={redact_text(v)}" for k, v in tags)
     return f"{name}{{{body}}}"
 
 

@@ -42,7 +42,7 @@ from newsforge.config import BrandConfig, assert_production_safe
 from newsforge.core.build_info import get_build_info
 from newsforge.core.logger import get_logger, log_event
 from newsforge.core.metrics import metrics
-from newsforge.db import get_session, init_db, generated_artifacts, publications, stories
+from newsforge.db import get_session, init_db, init_production_db, generated_artifacts, publications, stories
 from newsforge.db.models import PublicationStatus, from_jsonable
 from newsforge.seo.feeds import render_rss_xml, render_sitemap_xml
 from newsforge.seo.meta import (
@@ -158,8 +158,15 @@ def create_app() -> FastAPI:
     async def _lifespan(app: FastAPI):
         # Fail-fast production config gate (only enforced when ENVIRONMENT=production).
         assert_production_safe()
-        # Ensure the schema exists/migrates before serving (fresh /data volume).
-        init_db()
+        # Start the persistence layer. Production uses the gated startup path
+        # (config -> connect PostgreSQL -> migrate -> migration gate -> ready);
+        # development/test/staging keep the fast in-place migration path.
+        from newsforge.config import DatabaseConfig
+
+        if DatabaseConfig().is_production:
+            init_production_db()
+        else:
+            init_db()
         info = get_build_info()
         log_event(logger, "app_startup",
                   version=info["version"],

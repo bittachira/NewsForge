@@ -10,6 +10,7 @@ variables (see .env.example) and are never committed.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -19,6 +20,79 @@ def _env_bool(name: str, default: bool = False) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+# --------------------------------------------------------------------------- #
+# Secrets interface (PRODUCTION_SECRETS_AND_DEPLOYMENT)
+# --------------------------------------------------------------------------- #
+# The ONLY supported secret delivery is the environment (process env vars set by
+# the platform/secret provider; never files baked into the image). There is no
+# hardcoded fallback and no Vault/KMS client yet because no infrastructure has
+# been chosen — this interface is stable so a real provider can be dropped in
+# behind :func:`get_secret` without touching callers.
+_SECRET_ENV_SUFFIX_HINTS = ("key", "token", "secret", "password", "passwd")
+_PROVIDER_KEYS = frozenset({
+    "NEWSFORGE_OPENAI_API_KEY",
+    "NEWSFORGE_LM_STUDIO_API_KEY",
+    "NEWSFORGE_ADMIN_TOKEN",
+})
+
+
+def get_secret(name: str) -> str | None:
+    """Return a secret value from the environment (never defaults/fallbacks).
+
+    ``None`` when the secret is not configured. ``lightweight``: reading the
+    environment is the single supported mechanism (no broker, no file, no DB)."""
+    return os.getenv(name)
+
+
+def secret_source() -> str:
+    """Name of the active secret delivery mechanism (for docs/reporting)."""
+    return "env"
+
+
+def _active_secret_values() -> list[str]:
+    """Values currently exported in env vars that hold credentials.
+
+    Used by the redaction layer to mask *configured* secrets (exact value
+    replacement, not just format patterns) and by metrics validation. Only values
+    of ``*KEY/*TOKEN/*SECRET/*PASSWORD``-named variables are candidates; empty and
+    very short values are ignored so ordinary text is never mangled."""
+    values: list[str] = []
+    for name, value in os.environ.items():
+        upper = name.upper()
+        if upper in _PROVIDER_KEYS or any(
+            upper.endswith(suffix) for suffix in _SECRET_ENV_SUFFIX_HINTS
+        ):
+            if value and len(value) >= 6:
+                values.append(value)
+    # PostgreSQL passwords embedded in the DSN are secrets too.
+    dsn = os.getenv("NEWSFORGE_DATABASE_URL") or os.getenv("NEWSFORGE_DB_PATH")
+    if dsn:
+        match = re.match(
+            r"^[a-zA-Z][a-zA-Z0-9+.-]*://[^:/@]+:(?P<password>[^@]*)@",
+            str(dsn).strip(),
+        )
+        if match and len(match.group("password")) >= 6:
+            values.append(match.group("password"))
+    return values
+
+
+def missing_production_secrets() -> list[str]:
+    """Names of secrets REQUIRED for a production start that are not configured."""
+    missing: list[str] = []
+    if not os.getenv("NEWSFORGE_ADMIN_TOKEN"):
+        missing.append("NEWSFORGE_ADMIN_TOKEN")
+    is_prod = _default_environment() == "production"
+    if not is_prod:
+        return missing
+    if not os.getenv("NEWSFORGE_DATABASE_URL"):
+        missing.append("NEWSFORGE_DATABASE_URL")
+    if not _env_bool("NEWSFORGE_MOCK_AI", True):
+        provider = (os.getenv("NEWSFORGE_DEFAULT_PROVIDER", "mock") or "").strip().lower()
+        if provider == "openai" and not os.getenv("NEWSFORGE_OPENAI_API_KEY"):
+            missing.append("NEWSFORGE_OPENAI_API_KEY")
+    return missing
 
 
 def redact_dsn(dsn: str | None) -> str | None:
@@ -94,6 +168,12 @@ def _default_environment() -> str:
     return os.getenv("NEWSFORGE_ENVIRONMENT", "development").strip().lower()
 
 
+# Declared production deployment target. NO provider/region/compute/storage have
+# been selected for this project yet — every field stays unset until a real host
+# is chosen, and no cloud resource is ever invented or pre-allocated.
+PRODUCTION_DEPLOYMENT_TARGET = "UNSELECTED"
+
+
 def _default_backup_dir() -> Path:
     return _resolve_data_path(os.getenv("NEWSFORGE_BACKUP_DIR", "data/backups"))
 
@@ -124,6 +204,51 @@ class DatabaseConfig:
         return str(redact_dsn(str(self.path)))
 
 
+def validate_ai_production_config() -> list[str]:
+    """Blocks a production boot with an unsafe or unconfigured real AI provider.
+
+    Reads the CURRENT environment at call time (the gate runs at startup when the
+    environment is final). Only evaluated when ``NEWSFORGE_MOCK_AI=false`` — the
+    MOCK flag itself is rejected by :func:`validate_production_config` (a real
+    provider must be selected EXPLICITLY; ``MOCK_AI`` can never activate silently).
+    """
+    problems: list[str] = []
+    if _env_bool("NEWSFORGE_MOCK_AI", True):
+        return problems  # MOCK flag problem is reported by the main gate
+    provider = (os.getenv("NEWSFORGE_DEFAULT_PROVIDER", "mock") or "").strip().lower()
+    if provider == "mock":
+        problems.append(
+            "PRODUCTION requires an explicit real provider (NEWSFORGE_DEFAULT_PROVIDER "
+            "=openai|lm_studio|ollama); 'mock' is never a valid production provider"
+        )
+    elif provider not in ("openai", "lm_studio", "ollama"):
+        problems.append(
+            f"PRODUCTION requires a supported AI provider, got {provider!r} "
+            "(openai|lm_studio|ollama)"
+        )
+    if provider == "openai" and not os.getenv("NEWSFORGE_OPENAI_API_KEY"):
+        problems.append(
+            "PRODUCTION requires NEWSFORGE_OPENAI_API_KEY when "
+            "NEWSFORGE_DEFAULT_PROVIDER=openai"
+        )
+    try:
+        timeout = float(os.getenv("NEWSFORGE_AI_TIMEOUT_S", "30") or "30")
+        if timeout <= 0:
+            problems.append("PRODUCTION requires NEWSFORGE_AI_TIMEOUT_S > 0")
+    except (TypeError, ValueError):
+        problems.append("PRODUCTION requires NEWSFORGE_AI_TIMEOUT_S to be a number")
+    try:
+        max_tokens = int(os.getenv("NEWSFORGE_AI_MAX_TOKENS", "500") or "500")
+        if max_tokens <= 0:
+            problems.append("PRODUCTION requires NEWSFORGE_AI_MAX_TOKENS > 0")
+    except (TypeError, ValueError):
+        problems.append("PRODUCTION requires NEWSFORGE_AI_MAX_TOKENS to be a number")
+    model = (os.getenv("NEWSFORGE_MEDIUM_MODEL", "gpt-4o") or "").strip()
+    if provider in ("openai", "lm_studio") and not model:
+        problems.append("PRODUCTION requires a non-empty NEWSFORGE_MEDIUM_MODEL")
+    return problems
+
+
 def validate_production_config(cfg: DatabaseConfig | None = None) -> list[str]:
     """Return a list of problems that block PRODUCTION startup.
 
@@ -131,7 +256,8 @@ def validate_production_config(cfg: DatabaseConfig | None = None) -> list[str]:
     and test environments are never gated by this check. The relevant gates read
     the CURRENT environment (``NEWSFORGE_MOCK_AI`` / ``NEWSFORGE_DEBUG`` /
     ``NEWSFORGE_SITE_URL``) at call time — the gate runs at process startup, when
-    the environment is final, which also keeps it fully testable via monkeypatch."""
+    the environment is final, which also keeps it fully testable via monkeypatch.
+    """
     cfg = cfg or DatabaseConfig()
     problems: list[str] = []
     if not cfg.is_production:
@@ -142,12 +268,48 @@ def validate_production_config(cfg: DatabaseConfig | None = None) -> list[str]:
         problems.append("PRODUCTION requires NEWSFORGE_ADMIN_TOKEN")
     if _env_bool("NEWSFORGE_MOCK_AI", True):
         problems.append("PRODUCTION requires NEWSFORGE_MOCK_AI=false")
+    else:
+        problems.extend(validate_ai_production_config())
     if _env_bool("NEWSFORGE_DEBUG", False):
         problems.append("PRODUCTION forbids NEWSFORGE_DEBUG=true")
     site_url = (os.getenv("NEWSFORGE_SITE_URL", "http://localhost:8000") or "").rstrip("/")
     if not site_url or site_url.startswith("http://localhost"):
         problems.append("PRODUCTION requires NEWSFORGE_SITE_URL to be a public https URL")
     return problems
+
+
+def assert_mock_not_active_in_production(mock: bool) -> None:
+    """Belt-and-suspenders guard: MOCK AI must NEVER be active in a production env.
+
+    The main gate (:func:`assert_production_safe`) rejects ``NEWSFORGE_MOCK_AI=
+    true`` at startup; this also protects any direct ``AiRouter(mock=True)`` use
+    (e.g. an offline job) that could otherwise run in MOCK against production."""
+    if _default_environment() == "production" and mock:
+        raise RuntimeError(
+            "NEWSFORGE_MOCK_AI=true is forbidden in a production environment; "
+            "a real provider and credentials are required"
+        )
+
+
+def production_deployment_target() -> dict[str, str | None]:
+    """Declared production deployment target (PRODUCTION_DEPLOYMENT_TARGET).
+
+    NO provider/compute/storage has been selected yet: every field is
+    ``None``/``UNSELECTED``. This is the abstraction layer that a REAL provider
+    selection will fill in the deployment phase — nothing here is invented or
+    pre-allocated."""
+    return {
+        "target": PRODUCTION_DEPLOYMENT_TARGET,
+        "provider": None,
+        "region": None,
+        "compute": None,
+        "postgresql": None,
+        "storage": None,
+        "secret_mechanism": secret_source(),
+        "domain": None,
+        "tls": None,
+        "rollback": None,
+    }
 
 
 def assert_production_safe(cfg: DatabaseConfig | None = None) -> None:

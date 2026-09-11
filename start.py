@@ -5,12 +5,19 @@ Usage:
     # Development (local):
     python -m uvicorn src.newsforge.web.app:app --reload
 
-    # Production:
-    NEWSFORGE_MOCK_AI=true python -m uvicorn src.newsforge.web.app:app \
-        --host 0.0.0.0 --port 8000
+    # Production (PostgreSQL + real AI; the fail-fast configuration gate runs at
+    # startup and REFUSES to boot on any unsafe/missing value):
+    NEWSFORGE_ENVIRONMENT=production \
+    NEWSFORGE_DATABASE_URL=postgresql+pg8000://user:pass@host/newsforge \
+    NEWSFORGE_ADMIN_TOKEN=$(python -c "import secrets;print(secrets.token_urlsafe(32))") \
+    NEWSFORGE_MOCK_AI=false \
+    NEWSFORGE_DEFAULT_PROVIDER=openai \
+    NEWSFORGE_OPENAI_API_KEY=<key> \
+    NEWSFORGE_SITE_URL=https://newsforge.example \
+    python -m uvicorn src.newsforge.web.app:app --host 0.0.0.0 --port 8000
 
-    # With environment from template (optional):
-    . .env && python -m uvicorn src.newsforge.web.app:app --host 0.0.0.0 --port 8000
+    # See PRODUCTION_READINESS.md for the full contract, and the deployment smoke
+    # script (scripts/deploy_smoke.py) for post-deployment verification.
 
 Health check endpoint: GET http://localhost:8000/health
 """

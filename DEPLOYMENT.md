@@ -1,136 +1,102 @@
-# NewsForge - Deployment Documentation
+# NewsForge Deployment
 
-This directory contains the minimal infrastructure required to deploy NewsForge MVP in production.
+This file is the operational quick reference. The full security / gate / backup /
+rollback contract lives in **[PRODUCTION_READINESS.md](./PRODUCTION_READINESS.md)**.
 
-## Quick Start
+> **Current status:** staging fully verified; the production deployment target is
+> `UNSELECTED`. Nothing below deploys to a real host yet.
 
-### Local Development
+## Environments
+
+- `NEWSFORGE_ENVIRONMENT=development|test|staging` — never gated.
+- `NEWSFORGE_ENVIRONMENT=production` — fail-fast configuration gates are enforced
+  at startup (see PRODUCTION_READINESS.md §2/§3/§8). Production is refused when
+  any of these is absent/misconfigured: PostgreSQL `NEWSFORGE_DATABASE_URL`,
+  `NEWSFORGE_ADMIN_TOKEN`, `NEWSFORGE_MOCK_AI=false` + an explicit real AI
+  provider + key, public https `NEWSFORGE_SITE_URL`, no debug.
+
+## Local development
 
 ```bash
 python -m uvicorn src.newsforge.web.app:app --reload
 ```
 
-Then visit: http://localhost:8000
+Visits http://localhost:8000. Development defaults to SQLite + MOCK AI — no
+network, no secrets.
 
-### Health Check
-
-```bash
-curl http://localhost:8000/health
-```
-
-Expected response (after DB init):
-```json
-{"status": "ok", "db": "connected"}
-```
-
-### Production Deployment
-
-1. **Clone or copy the repository**
-
-2. **Configure environment** (copy `.env.example` to `.env`):
+## Staging / container
 
 ```bash
-cp .env.example .env  # Copy template first
-# Edit .env with your configuration
+# staged image with deterministic build identity
+docker build --tag newsforge:staging --target runtime \
+  --build-arg GIT_COMMIT=$(git rev-parse HEAD) \
+  --build-arg VERSION=0.1.0 \
+  --build-arg BUILD_TIME="$GIT_AUTHOR_DATE" .
+
+docker run -d -p 8000:8000 \
+  --name newsforge-staging \
+  -e NEWSFORGE_ENVIRONMENT=staging \
+  -e NEWSFORGE_MOCK_AI=true \
+  -e NEWSFORGE_ADMIN_TOKEN=<strong-random-token> \
+  -v newsforge-data:/data \
+  newsforge:staging
 ```
 
-3. **(Optional) Mount persistent data directory**
+Verify: `/health`, `/live`, `/ready`, `/articles`, `/sitemap.xml`, `/feed.xml`.
+Internal `/analytics` and `/metrics` require the admin token (fail-closed).
 
-For Docker:
-```yaml
-volumes:
-  - ./data:/data      # Persist SQLite database between restarts
-```
+## Production (when a target is selected)
 
-4. **Start the application:**
+1. Provide the environment (see `.env.production.example`): PostgreSQL DSN,
+   admin token, real AI provider + key, public https site URL, `NEWSFORGE_
+   ENVIRONMENT=production`.
+2. Run the image with an explicit command/port, `/data` on a persistent volume,
+   `/app` mounted read-only, HTTPS terminated in front.
+3. Startup performs: configuration gate → connect PostgreSQL → Alembic
+   `upgrade head` → migration gate → serve. The process refuses to start on any
+   gate failure.
+4. Post-deployment smoke: `NEWSFORGE_SMOKE_BASE_URL=… NEWSFORGE_ADMIN_TOKEN=…
+   python scripts/deploy_smoke.py`.
 
-```bash
-NEWSFORGE_MOCK_AI=true python -m uvicorn \
-    src.newsforge.web.app:app \
-    --host 0.0.0.0 \
-    --port 8000
-```
+## Migrations
 
-5. **Verify deployment:**
+- Bootstrap/legacy/upgrade flows are automatic **and explicit** (Alembic):
+  see PRODUCTION_READINESS.md §5.
+- The DB alive at an incompatible revision fails fast; it is never silently
+  mutated.
 
-```bash
-curl http://localhost:8000/health
-curl http://localhost:8000/articles
-curl http://localhost:8000/sitemap.xml
-curl http://localhost:8000/feed.xml
-```
+## Backups
 
-### Docker Deployment
+- Nightly `pg_dump` (custom format) verified with `pg_restore --list`
+  (`PostgresBackupProvider`, implemented + tested). Operator schedules the
+  nightly job and the retention/restore drill; see PRODUCTION_READINESS.md §7.
 
-```bash
-docker build -t newsforge .
-docker run -p 8000:8000 \
-    -v $(pwd)/data:/data \
-    newsforge
-```
+## Rollback
 
-Then verify:
-```bash
-curl http://localhost:8000/health
-```
+- Redeploy the previous commit's image; the migration gate + schema boundary make
+  an old app against a newer database fail visibly rather than corrupt data.
+  Details in PRODUCTION_READINESS.md §14.
 
-## Environment Variables
+## Environment variables
 
-| Variable | Default | Required | Purpose |
-|----------|---------|----------|---------|
-| `NEWSFORGE_DB_PATH` | `data/newsforge.db` | No | Path to SQLite database file |
-| `NEWSFORGE_MOCK_AI` | `true` | No | Enable offline/mock mode (no external API) |
-| `NEWSFORGE_DEFAULT_PROVIDER` | `mock` | No | AI provider: `mock`, `openai`, `ollama` |
-| `NEWSFORGE_OPENAI_API_KEY` | - | If using OpenAI | OpenAI API key |
-| `NEWSFORGE_SITE_URL` | `http://localhost:8000` | No | Public URL of the application |
-| `NEWSFORGE_HOST` | `127.0.0.1` | No | Bind address for Uvicorn |
-| `NEWSFORGE_PORT` | `8000` | No | Port for Uvicorn |
+| Variable | Production | Purpose |
+|----------|-----------|---------|
+| `NEWSFORGE_ENVIRONMENT` | `production` | enables fail-fast gates |
+| `NEWSFORGE_DATABASE_URL` | required (PG) | `postgresql+pg8000://…` |
+| `NEWSFORGE_ADMIN_TOKEN` | required | `/analytics`, `/metrics` gate |
+| `NEWSFORGE_MOCK_AI` | `false` | MOCK refused in production |
+| `NEWSFORGE_DEFAULT_PROVIDER` | `openai\|lm_studio\|ollama` | explicit real provider |
+| `NEWSFORGE_OPENAI_API_KEY` | if openai | provider credential |
+| `NEWSFORGE_SITE_URL` | required (https) | canonical/public URLs |
+| `NEWSFORGE_BACKUP_DIR` | default `/data/backups` | offline backups |
+| `NEWSFORGE_HOST` / `NEWSFORGE_PORT` | `0.0.0.0` / `8000` | uvicorn bind |
+| `NEWSFORGE_DEBUG` | `false` | debug refused in production |
 
-## Database Initialization
-
-The database is created automatically on first run. To reset:
-
-```bash
-rm -rf data/newsforge.db
-# Then restart the application
-```
-
-## Health Endpoint
-
-The `/health` endpoint verifies:
-- Application is running
-- Database connection is working
-
-Returns JSON with status code 200 when healthy.
-
-## Offline Mode (MOCK AI)
-
-By default, NewsForge runs in MOCK mode (`NEWSFORGE_MOCK_AI=true`). No external AI API is required. This is suitable for initial deployment and testing.
-
-To use a real AI provider:
-1. Set `NEWSFORGE_MOCK_AI=false`
-2. Configure your preferred provider (OpenAI, Ollama, etc.)
-3. Provide necessary API credentials
-
-## Security Notes
-
-- Never commit `.env` files to version control
-- Use environment variables or secrets management for production
-- The Dockerfile does not include any AI API keys by default
-
-## Logs
-
-Application logs are written to stdout/stderr. For persistent logging, redirect output:
-
-```bash
-python -m uvicorn ... > app.log 2>&1
-```
-
-Or use Uvicorn's built-in log handlers for structured JSON logging.
+Never commit real values; use the secret provider / environment (see
+PRODUCTION_READINESS.md §3).
 
 ## Support
 
-For issues or questions, refer to:
-- Project README: `README.md`
-- Source code documentation in docstrings
-- Issue tracker at repository root
+- Full contract: [PRODUCTION_READINESS.md](./PRODUCTION_READINESS.md)
+- Persistence notes: [PERSISTENCE.md](./PERSISTENCE.md)
+- Reproducibility notes: [REPRODUCIBILITY.md](./REPRODUCIBILITY.md)
