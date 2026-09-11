@@ -79,7 +79,9 @@ LABEL org.opencontainers.image.version=${VERSION}
 USER newsforge
 
 EXPOSE 8000
-CMD ["uvicorn", "newsforge.web.app:app", "--host", "0.0.0.0", "--port", "8000"]
+# Bind the platform-injected port when provided (Render sets $PORT=10000),
+# fall back to NEWSFORGE_PORT, then the documented local default (8000).
+CMD ["sh", "-c", "exec uvicorn newsforge.web.app:app --host 0.0.0.0 --port ${PORT:-${NEWSFORGE_PORT:-8000}}"]
 
 # ---------------------------------------------------------------------------
 # test - runtime + pytest overlay. Used ONLY by CI to run the suite in-container.
