@@ -115,6 +115,12 @@ _GENERIC_SIGNAL_WORDS: frozenset[str] = frozenset({
     "phone", "phones", "camera", "cameras", "battery", "screen", "display",
     "processor", "performance", "quality", "review", "reviews", "cost",
     "pro", "max", "flagship", "design", "device", "devices", "smartphone", "bad",
+    # Spec-sheet vocabulary shared by full real product descriptions: two unrelated
+    # phones (or two models of one family) merge on these, so they carry no signal.
+    "android", "bluetooth", "connectivity", "dimensions", "esim", "gnss", "ip68",
+    "making", "made", "nfc", "oled", "operating", "ram", "resistance", "selfie",
+    "storage", "system", "tele", "tensor", "uw", "uwb", "water", "weight", "wifi",
+    "120hz", "3in", "48mp", "512gb", "5g", "5m", "5x", "g6",
 })
 # Four-digit year tokens are shared by nearly every feed item and carry no signal.
 _YEAR_TOKEN_RE = re.compile(r"^(?:19|20)\d{2}$")

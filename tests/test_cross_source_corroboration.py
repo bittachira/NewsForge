@@ -277,7 +277,14 @@ _REAL_ITEMS = [
       "smaller phone with a killer camera. Google's latest Pro phone is out to prove "
       "it has the best camera on a smartphone while embracing customisation, allowing "
       "you to change the look and feel of your photos far beyond simple filters even "
-      "if that means making them technically worse.")),
+      "if that means making them technically worse. The Pixel 11 Pro packs the best of "
+      "Google's hardware and software into a still-pocketable and easy to handle frame, "
+      "instantly making it a contender for best smaller phone of the year. Screen: 6.3in "
+      "120Hz QHD+ OLED (495ppi). Processor: Google Tensor G6. RAM: 12 or 16GB. Storage: "
+      "256, 512GB or 1TB. Operating system: Android 17. Camera: 50MP+ 48MP UW + 48MP 5x "
+      "tele; 42MP selfie. Connectivity: 5G, eSIM, wifi 7, UWB, NFC, Bluetooth 6, Thread "
+      "and GNSS. Water resistance: IP68 (1.5m for 30 minutes). Dimensions: 152.7 x 71.9 "
+      "x 8.4mm. Weight: 204g")),
     ("instagram-boss",
      "Instagram boss says users will be 'overwhelmed' with brand content in algorithm-free world",
      ("Adam Mosseri says platform's algorithm 'feels like a black box' but company "
@@ -290,7 +297,16 @@ _REAL_ITEMS = [
       "keep quality Android ahead of competition. Google's Pixel 11 continues to set "
       "the standard for what you should expect from the base model of a flagship phone "
       "with class-leading cameras, long software support and almost all the bells and "
-      "whistles of its most expensive phones.")),
+      "whistles of its most expensive phones. The regular Pixel 11 costs \u00a3879 "
+      "(\u20ac999/$899/A$1,499) making it \u00a380 or equivalent more expensive than last "
+      "year's model as the cost of RAMageddon continues to bite. It's not cheap by any "
+      "stretch of the imagination, but it comes with 256GB of storage and is \u00a3200 "
+      "less than the Pixel 11 Pro, matching rival Samsung's Galaxy S26. Screen: 6.3in "
+      "120Hz FHD+ OLED (422ppi). Processor: Google Tensor G6. RAM: 12GB. Storage: 256 or "
+      "512GB. Operating system: Android 17. Camera: 48MP+ UW 5x tele; selfie 13MP UW. "
+      "Connectivity: 5G, eSIM, wifi 6E, UWB, NFC, Bluetooth 6 and GNSS. Water "
+      "resistance: IP68 (1.5m for 30 minutes). Dimensions: 152.8 x 72.0 x 8.6mm. "
+      "Weight: 197g")),
 ]
 
 # The ONLY genuine same-event pair among the real items above.
