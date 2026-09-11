@@ -16,7 +16,6 @@ import hashlib
 import re
 
 from newsforge.db.models import ClaimStatus
-from newsforge.stories.detector import significant_tokens
 
 
 def build_claim(
@@ -56,62 +55,188 @@ def build_claim(
 _CAPWORD_RE = re.compile(r"\b([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*)")
 
 
-# A single capitalized proper noun alone is a weak event signal: two stories that
-# merely name the same company (e.g. "Apple") would wrongly merge. We therefore
-# require at least one shared significant token alongside it, which the shared name
-# itself provides. Multi-word proper nouns ("Central Bank") are stronger and match
-# directly. Without any shared proper noun, an event match needs at least this many
-# shared significant tokens so two generic tech/economy stories never merge.
-_SINGLE_CAP_MIN_TOKENS = 1
-_NO_ENTITY_MIN_TOKENS = 3
+# Feed boilerplate from real Gazette/BBC/Guardian exports: HTML tags, "Continue
+# reading", newsletter signup shims and generic navigation text are stripped BEFORE
+# entity/token extraction so they can never fabricate a shared signal.
+_BOILERPLATE_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(r"\bcontinue\s+reading(?:\s+the\s+main\s+story)?\b[.\s]*", re.IGNORECASE),
+    re.compile(r"\bsign\s+up\s+(?:to|for)\b[^.]*\.", re.IGNORECASE),
+    re.compile(r"\bavailable\s+for\s+everyone,?\s*funded\s+by\s+readers\b[^.]*\.", re.IGNORECASE),
+    re.compile(r"\bthis\s+article\s+is\s+more\s+than\b[^.]*\.", re.IGNORECASE),
+    re.compile(r"\b(?:read|show|see|find\s+out)\s+more\b", re.IGNORECASE),
+    re.compile(r"\bthe\s+latest\s+news\b[^.]*\.", re.IGNORECASE),
+]
+
+# Generic tokens that are too weak to corroborate an event even when shared across
+# sources: common "meta" tech/business vocabulary, pronouns, modals and filler set by
+# every outlet. Entities and event-specific signals are extracted AFTER filtering this
+# list, so a shared ``ai``/``report``/``company`` never merges unrelated stories.
+_GENERIC_SIGNAL_WORDS: frozenset[str] = frozenset({
+    "a", "an", "the", "and", "or", "but", "of", "to", "in", "on", "at", "for", "with",
+    "by", "from", "as", "is", "are", "was", "were", "be", "been", "being", "am", "has",
+    "have", "had", "do", "does", "did", "will", "would", "can", "could", "may", "might",
+    "shall", "should", "must", "not", "no", "nor", "so", "than", "that", "this", "these",
+    "those", "there", "here", "it", "its", "he", "she", "we", "us", "our", "they",
+    "them", "their", "you", "your", "i", "me", "my", "who", "whom", "whose", "which",
+    "what", "when", "where", "why", "how", "then", "now", "up", "down", "out", "into",
+    "over", "under", "off", "about", "after", "before", "during", "within", "between",
+    "again", "once", "even", "just", "also", "only", "very", "still", "yet", "too",
+    "much", "many", "most", "more", "some", "any", "each", "every", "both",
+    "one", "two", "first", "last", "new", "best", "top", "latest",
+    "say", "says", "said", "told", "reports", "report", "according", "news", "story",
+    "tech", "technology", "technologies", "digital", "online", "internet",
+    "web", "data", "app", "apps", "software", "hardware", "computer", "computers",
+    "company", "companies", "firm", "firms", "business", "businesses", "startup",
+    "startups", "industry", "market", "markets", "product", "products", "price",
+    "prices", "user", "users", "customer", "customers", "people", "person", "year",
+    "years", "month", "months", "week", "weeks", "day", "days", "time", "times",
+    "today", "tomorrow", "yesterday", "world", "global", "nation", "countries",
+    "country", "usa", "uk", "eu", "europe", "government", "official",
+    "artificial", "intelligence", "ai", "llm", "chatbot", "chatbots", "robot",
+    "robots", "security", "safety", "study", "research",
+    "researchers", "researcher", "scientist", "scientists", "expert", "experts", "analysis",
+    "announcement", "developments", "update", "updates", "version", "versions",
+    "releases", "release", "launch", "launches", "placed", "plans", "plan",
+    "million", "billions", "billion", "pound", "pounds", "euros", "dollar",
+    "dollars", "per", "cent", "percent", "since", "while", "against", "through",
+    "despite", "because", "though", "although", "if", "whether", "unless",
+    "nearly", "almost", "around", "approximately", "roughly", "least", "without", "across", "toward", "towards", "inside", "behind", "beyond",
+    "amid", "reportedly", "confirmed", "minutes", "hours", "annual", "quarter",
+    "quarterly", "monthly", "weekly", "daily", "average", "expected", "fastest",
+    "leading", "popular", "advanced", "advancements", "models", "model", "tools",
+    "tool", "features", "feature", "offers", "offer", "brings", "bring", "makes",
+    "make", "work", "works", "working", "lives", "living", "life", "real",
+    "actual", "same", "different", "other", "another",
+    # Generic risk/safety vocabulary shared by every Anthropic-style safety story.
+    "threat", "threats", "warn", "warns", "warned", "warning", "warnings", "risk",
+    "risks", "unsafe", "perils", "concern", "concerns", "fear", "fears", "danger",
+    "dangers", "all", "come", "comes", "use", "used", "using",
+    # Product-review vocabulary: phone stories would otherwise merge on these.
+    "phone", "phones", "camera", "cameras", "battery", "screen", "display",
+    "processor", "performance", "quality", "review", "reviews", "cost",
+    "pro", "max", "flagship", "design", "device", "devices", "smartphone", "bad",
+})
+# Four-digit year tokens are shared by nearly every feed item and carry no signal.
+_YEAR_TOKEN_RE = re.compile(r"^(?:19|20)\d{2}$")
+# Pure-numeric tokens (model numbers, specs, prices, counts) carry no event signal.
+_NUMERIC_TOKEN_RE = re.compile(r"^[0-9]+$")
+
+# HTML tags are stripped before any matching so markup can never leak tokens.
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+
+# A shared proper noun establishes the entity (who/what the event is about), but a
+# SINGLE company/app name alone is a weak event signal (an "Apple" investment story
+# and an "Apple" product review would wrongly merge). Corroboration therefore needs:
+#
+#   * a shared MULTI-WORD proper noun (e.g. "Central Bank")  -> direct match; or
+#   * a shared SINGLE proper noun AND >= 1 shared significant (generic-filtered)
+#     non-entity token drawn from the item's TITLE plus its DESCRIPTION. The
+#     description is *controlled support*: it may supply the extra signal ("former",
+#     "missiles") but never the event identity on its own.
+#
+# Without a shared entity there is NO fallback (the old global ">= 3 shared tokens"
+# rule is gone). Entity extraction only considers capitalized words inside the TITLE,
+# so sentence-initial "Is", boilerplate fragments and acronyms (AI/UK/EU) can't count.
 _MULTI_WORD_MIN_PARTS = 2
 
 
-def _capitalized_phrases(text: str | None) -> set[str]:
-    """Proper-noun phrases in ``text``, excluding ALL-CAPS acronyms (AI/UK/EU/...)."""
+def _clean_text(text: str | None) -> str:
+    """Strip HTML and feed boilerplate, then collapse whitespace."""
+    if not text:
+        return ""
+    cleaned = _HTML_TAG_RE.sub(" ", text)
+    for _ in range(3):
+        updated = cleaned
+        for pattern in _BOILERPLATE_PATTERNS:
+            updated = pattern.sub(" ", updated)
+        if updated == cleaned:
+            break
+        cleaned = updated
+    return " ".join(cleaned.split())
+
+
+def _significant_set(text: str | None) -> set[str]:
+    """Generic-filtered lowercase keywords in ``text`` (signal tokens)."""
     if not text:
         return set()
+    cleaned = _clean_text(text).lower().replace("'s", "")
     return {
-        " ".join(p.split())
-        for p in _CAPWORD_RE.findall(text)
-        if any(ch.islower() for ch in p)
+        t for t in re.findall(r"[a-z0-9]+", cleaned)
+        if len(t) >= 2
+        and t not in _GENERIC_SIGNAL_WORDS
+        and not _YEAR_TOKEN_RE.match(t)
+        and not _NUMERIC_TOKEN_RE.match(t)
     }
 
 
-def evidence_matches(subject_text: str | None, candidate_text: str | None) -> bool:
-    """Deterministic predicate: does ``candidate_text`` support the same claim as ``subject_text``?
+def _title_entities(title: str | None) -> set[str]:
+    """Proper-noun phrases in the TITLE only, with weak capitalizations filtered.
+
+    Skips ALL-CAPS acronyms (AI/UK/EU), phrases whose leading word is a generic
+    sentence-starter ("Is", "Does", "How", "Will") and phrases where EVERY token is
+    generic filler (e.g. "The") -- those describe no real entity.
+    """
+    if not title:
+        return set()
+    phrases: set[str] = set()
+    for match in _CAPWORD_RE.finditer(_clean_text(title)):
+        phrase = " ".join(match.group(1).split())
+        if not any(ch.islower() for ch in phrase):
+            continue  # ALL-CAPS acronym
+        tokens = [t.lower() for t in phrase.split()]
+        if not tokens or tokens[0] in _GENERIC_SIGNAL_WORDS:
+            continue
+        if all(t in _GENERIC_SIGNAL_WORDS for t in tokens):
+            continue
+        phrases.add(phrase.lower())
+    return phrases
+
+
+def evidence_matches(
+    *,
+    subject_title: str | None,
+    subject_description: str | None,
+    candidate_title: str | None,
+    candidate_description: str | None,
+) -> bool:
+    """Deterministic predicate: do two cross-source items support the SAME event?
 
     Cross-source items only corroborate each other when they describe the SAME event.
-    The signal reuses the story detector's normalizer (:func:`significant_tokens`) so
-    evidence linkage is consistent with clustering. A candidate matches when:
+    Entity identity comes from the TITLE; the description plays a strictly *controlled
+    support* role (it can supply the extra corroborating signal, never the identity).
+    A candidate matches when:
 
-    * both texts share a MULTI-WORD proper noun (e.g. ``Central Bank``); or
-    * both share a SINGLE capitalized proper noun AND at least one significant token
-      (the shared name itself counts, so "Anthropic ... bioweapons" corroborates
-      "Anthropic ... biology projects"); or
-    * they share >= 3 significant tokens.
+    * both TITLES share a MULTI-WORD proper noun (e.g. ``Central Bank``); or
+    * both TITLES share a SINGLE proper noun AND the items share >= 1 significant
+      generic-filtered non-entity signal across title+description (e.g. BBC "Anthropic
+      blocks ... biological weapons" x Guardian "Anthropic details ... bioweapons"
+      corroborate via ``former``, while a Google investment story and a Google phone
+      review share only the name and do NOT).
 
-    ALL-CAPS acronyms (``AI``, ``UK``, ``EU``) are ignored as entities. The predicate
-    is symmetric, pure and threshold-based (no LLM). It errs toward under-merge except
-    for single-entity-name matches (two stories merely naming the same company can
-    over-merge) -- the pinned regression guarantees unrelated story members never
-    fabricate corroboration, and the publish gates keep the residual risk on REVIEW.
+    Sentence-initial capitalized words ("Is", "Does"), ALL-CAPS acronyms (AI/UK/EU),
+    generic tech/business vocabulary, feed boilerplate and HTML markup are filtered out
+    before matching, so "3 shared words" alone NEVER matches. The predicate is
+    symmetric, pure and threshold-based (no LLM).
     """
-    if not subject_text or not candidate_text:
+    if not subject_title or not candidate_title:
         return False
-    stokens = {t.lower() for t in significant_tokens(subject_text)}
-    ctokens = {t.lower() for t in significant_tokens(candidate_text)}
-    shared_tokens = stokens & ctokens
-    sphrases = {p.lower() for p in _capitalized_phrases(subject_text)}
-    cphrases = {p.lower() for p in _capitalized_phrases(candidate_text)}
-    shared_phrases = sphrases & cphrases
-    multi_word = {p for p in shared_phrases if len(p.split()) >= _MULTI_WORD_MIN_PARTS}
+    shared_entities = _title_entities(subject_title) & _title_entities(candidate_title)
+    if not shared_entities:
+        return False
+
+    entity_words = set()
+    for phrase in shared_entities:
+        entity_words.update(phrase.split())
+
+    multi_word = {p for p in shared_entities if len(p.split()) >= _MULTI_WORD_MIN_PARTS}
     if multi_word:
         return True
-    single_word = shared_phrases - multi_word
-    if single_word:
-        return len(shared_tokens) >= _SINGLE_CAP_MIN_TOKENS
-    return len(shared_tokens) >= _NO_ENTITY_MIN_TOKENS
+
+    # Single-entity match: need one shared non-entity signal from title+description.
+    subject_pool = (_significant_set(subject_title) | _significant_set(subject_description)) - entity_words
+    candidate_pool = (_significant_set(candidate_title) | _significant_set(candidate_description)) - entity_words
+    return bool(subject_pool & candidate_pool)
 
 
 def _canonical_identity(text: str, story_id: str | None) -> str:

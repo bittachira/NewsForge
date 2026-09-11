@@ -128,10 +128,8 @@ def _default_claim_spec_builder(
 
     story_item_ids = [str(it.id) for it in items]
     tiers = sorted({_source_tier(session, it) for it in items})
-    texts = {
-        str(it.id): f"{it.title or ''} {it.description or ''}".strip()
-        for it in items if it is not None
-    }
+    item_titles = {str(it.id): (it.title or "") for it in items}
+    item_descriptions = {str(it.id): (it.description or "") for it in items}
 
     specs: list[dict] = []
     for item in items:
@@ -139,12 +137,17 @@ def _default_claim_spec_builder(
         if not text:
             continue
         own_id = str(item.id)
-        subject_text = texts.get(own_id, text)
         # Own item first (keeps claim provenance on its true origin), then the story's
         # other items that support the same event, in deterministic id order.
         evidence = [own_id] + [
             i for i in story_item_ids
-            if i != own_id and evidence_matches(subject_text, texts.get(i))
+            if i != own_id
+            and evidence_matches(
+                subject_title=item_titles.get(own_id),
+                subject_description=item_descriptions.get(own_id),
+                candidate_title=item_titles.get(i),
+                candidate_description=item_descriptions.get(i),
+            )
         ]
         claim_id = hashlib.sha256(
             f"{story_handle}|{item.id}|{text}".encode()

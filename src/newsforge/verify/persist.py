@@ -79,6 +79,42 @@ def _idempotent_add(session, instance) -> bool:
         return False
 
 
+def _upsert_by_key(session, model, key: dict, values: dict) -> str:
+    """Insert or update one ORM row keyed by ``key`` (the UNIQUE upsert key).
+
+    Returns ``"created"``, ``"updated"`` or ``"existing"`` so callers can count and
+    audit all three states. On a duplicate key the row is reloaded and the provided
+    fields are overwritten (the latest run is the source of truth); ``"updated"`` is
+    reported only when at least one field actually changed, so idempotent re-runs stay
+    clean no-ops and the persisted evaluation never silently diverges from the decision
+    that used it.
+    """
+    try:
+        session.add(model(**values))
+        session.commit()
+        return "created"
+    except IntegrityError:
+        # Duplicate key -> reset the transaction, reload and update in place.
+        session.rollback()
+        row = session.query(model).filter_by(**key).first()
+        if row is None:
+            return "existing"  # raced by another writer; idempotent no-op
+        changed = False
+        for name, value in values.items():
+            if not hasattr(row, name):
+                continue
+            # A None never erases a persisted value (keeps partial updates safe).
+            if value is None and getattr(row, name) is not None:
+                continue
+            if str(getattr(row, name)) != str(value):
+                setattr(row, name, value)
+                changed = True
+        if changed:
+            session.commit()
+            return "updated"
+        return "existing"
+
+
 def persist_claims(session, claim_records: Iterable[dict]) -> dict[str, int]:
     """Persist already-built claim records idempotently by ``claim_id``.
 
@@ -114,24 +150,30 @@ def link_claim_evidence(session, evidence_pairs: Iterable[tuple[str, str]]) -> d
 
 
 def store_trust_evaluations(session, evaluations: Iterable[dict]) -> dict[str, int]:
-    """Persist structured, explainable trust scores (§6, §7) idempotently by target key."""
-    counts = {"created": 0, "existing": 0}
+    """Persist structured, explainable trust scores (§6, §7) idempotently by target key.
+
+    A re-run that sees NEW corroboration updates the persisted evaluation in place
+    (``"updated"``) instead of leaving the stale score that the previous decision used.
+    """
+    counts = {"created": 0, "updated": 0, "existing": 0}
     for ev in evaluations:
-        if _idempotent_add(session, trust_evaluations(**ev)):
-            counts["created"] += 1
-        else:
-            counts["existing"] += 1
+        counts[_upsert_by_key(
+            session, trust_evaluations,
+            key={"target_type": ev["target_type"], "target_id": ev["target_id"]},
+            values=ev,
+        )] += 1
     return counts
 
 
 def store_quality_evaluations(session, evaluations: Iterable[dict]) -> dict[str, int]:
-    """Persist QUALITY GATE results (§9) idempotently by target key."""
-    counts = {"created": 0, "existing": 0}
+    """Persist QUALITY GATE results (§9) idempotently by target key (updates in place)."""
+    counts = {"created": 0, "updated": 0, "existing": 0}
     for ev in evaluations:
-        if _idempotent_add(session, quality_evaluations(**ev)):
-            counts["created"] += 1
-        else:
-            counts["existing"] += 1
+        counts[_upsert_by_key(
+            session, quality_evaluations,
+            key={"target_type": ev["target_type"], "target_id": ev["target_id"]},
+            values=ev,
+        )] += 1
     return counts
 
 
@@ -174,9 +216,11 @@ def record_decision(
     """Persist the CONTENT DECISION ENGINE outcome (§10, §14).
 
     ``decision_result`` is ``(decision, reasons, human_loop_verdict)`` from :func:`decide`.
-    Idempotent by (target_type, target_id); re-running updates in place via rejection. When the
-    decision cannot auto-publish (REVIEW/WAIT), a human-review task is created (§13). Returns the
-    persisted decision row as a dict, or None if it already existed and was left untouched.
+    Idempotent by (target_type, target_id): on a re-run the existing row is UPDATED in place
+    when the outcome changed (e.g. a later run corroborates previously single-source evidence
+    and the story moves WAIT -> PUBLISH), so the persisted decision never silently diverges
+    from the evaluation that produced it. Returns the persisted decision row as a dict.
+    REVIEW/WAIT rows always surface in the human-review queue (§13).
     """
     decision, reasons, verdict = decision_result
 
@@ -192,9 +236,12 @@ def record_decision(
     }
 
     ev["risk_level"] = risk_level or ev.get("risk_level")
-    created = _idempotent_add(session, decisions(**ev))
-    if not created:
-        return None  # already decided -> idempotent no-op
+
+    _upsert_by_key(
+        session, decisions,
+        key={"target_type": target_type, "target_id": target_id},
+        values=ev,
+    )
 
     row_id = _fetch_decision_pk(session, target_type, target_id)
 
@@ -203,7 +250,6 @@ def record_decision(
         _create_review_task(session, row_id, target_type, target_id, reasons, decision)
 
     return {"id": row_id, "decision": decision, "reasons": reasons, "verdict": verdict}
-
 
 def is_auto_publishable(decision_row) -> bool:
     """Publisher contract (H4). A future distributor must NOT receive an arbitrary object and assume
