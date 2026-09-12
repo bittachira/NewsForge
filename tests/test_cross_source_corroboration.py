@@ -578,3 +578,185 @@ def test_later_run_adopts_new_evidence_and_updates_persisted_evaluation():
         decision_rows = s.query(db.decisions).filter_by(target_id=story_key).all()
         assert len(decision_rows) == 1
         assert decision_rows[0].decision == "PUBLISH"
+
+
+# --------------------------------------------------------------------------- #
+# Signal audit (final algorithm review): a MATCH must be justified by specific
+# event signals, never by generic accidentals like "former". The predicate here
+# reports the exact signals that produced the verdict (requirements #2, #6, #8).
+# --------------------------------------------------------------------------- #
+def test_matching_signals_reports_event_signals_for_bioweapons_pair():
+    from newsforge.verify.claims import matching_signals
+
+    signals = matching_signals(
+        subject_title=_BBC_BIOWEAPONS,
+        subject_description=_BBC_BIOWEAPONS_DESC,
+        candidate_title=_GUARDIAN_BIOWEAPONS,
+        candidate_description=_GUARDIAN_BIOWEAPONS_DESC,
+    )
+    assert signals["matched"] is True
+    assert signals["shared_entities"] == ["anthropic"]
+    assert signals["rule"] == "shared_single_word_entity_and_event_concept"
+    assert signals["shared_concepts"] == ["biological_weapons"]
+    assert "biological_weapons" in signals["subject_title_concepts"]
+    assert "biological_weapons" in signals["candidate_title_concepts"]
+
+
+def test_former_is_generic_and_never_bridges_two_events():
+    """Requirement #3: ``former`` is an accidental word, not a signal.
+
+    It belongs to the generic set exactly like make/company/people/government/
+    researcher/review, so a shared single-word entity that has NOTHING else in
+    common can never corroborate through it.
+    """
+    from newsforge.verify.claims import (
+        _GENERIC_SIGNAL_WORDS,
+        _significant_set,
+        evidence_matches,
+        matching_signals,
+    )
+
+    assert "former" in _GENERIC_SIGNAL_WORDS
+    assert "former" not in _significant_set(
+        "a former top researcher at the company warned of the risks"
+    )
+    for weak in ("make", "company", "people", "government", "researcher", "review"):
+        assert weak in _GENERIC_SIGNAL_WORDS, weak
+
+    subject = "Aurora settles former antitrust claims"
+    candidate = "Aurora posts record revenue after former spinoff"
+    assert not evidence_matches(
+        subject_title=subject, subject_description=None,
+        candidate_title=candidate, candidate_description=None,
+    )
+    signals = matching_signals(
+        subject_title=subject, subject_description=None,
+        candidate_title=candidate, candidate_description=None,
+    )
+    assert signals["matched"] is False
+    assert signals["rule"] == "shared_single_word_entity_without_event_concept"
+    assert signals["shared_entities"] == ["aurora"]
+    assert signals["shared_concepts"] == []
+
+
+def test_every_real_feed_match_reports_justifying_signals():
+    """Requirement #8: each MATCH must say WHICH signals justified it.
+
+    Every same-event match in the real matrix (and ONLY the expected pairs) must
+    carry a rule plus non-empty shared entities; a single-word-entity match must
+    additionally carry a shared event concept.
+    """
+    from newsforge.verify.claims import matching_signals
+
+    by_label = {label: (title, desc) for label, title, desc in _REAL_ITEMS}
+    for left, (lt, ld) in by_label.items():
+        for right, (rt, rd) in by_label.items():
+            if left == right:
+                continue
+            signals = matching_signals(
+                subject_title=lt, subject_description=ld,
+                candidate_title=rt, candidate_description=rd,
+            )
+            expected = (left, right) in _SAME_EVENT_PAIRS
+            if signals["matched"]:
+                assert expected, f"{left} x {right} overstated its signals"
+                assert signals["rule"] in (
+                    "shared_multiword_entity",
+                    "shared_single_word_entity_and_event_concept",
+                )
+                assert signals["shared_entities"], f"{left} x {right}: no entity"
+                if signals["rule"] == "shared_single_word_entity_and_event_concept":
+                    assert signals["shared_concepts"], (
+                        f"{left} x {right}: single-word match needs a shared concept"
+                    )
+            else:
+                assert not expected, f"{left} x {right} lost its expected match"
+
+
+def test_anthropic_discrimination_bioweapons_vs_ai_risk_and_existential_risk():
+    """Requirement #6: same organism/entity, DIFFERENT events stay no-match.
+
+    The bioweapons pair is the ONLY Anthropic same-event pair. AI-safety and
+    existential-risk stories share the name (and the "threat report" context) but no
+    event concept, so they never corroborate the bioweapons story or each other.
+    """
+    from newsforge.verify.claims import evidence_matches, matching_signals
+
+    by_label = {label: (title, desc) for label, title, desc in _REAL_ITEMS}
+    bbc = by_label["bbc-bioweapons"]
+    gdn = by_label["guardian-bioweapons"]
+
+    assert evidence_matches(
+        subject_title=bbc[0], subject_description=bbc[1],
+        candidate_title=gdn[0], candidate_description=gdn[1],
+    )
+    negative_labels = [
+        "researcher-10", "more-researchers", "comic", "google-finland",
+        "pixel-pro", "pixel-11", "scammers", "instagram-boss",
+    ]
+    for label in negative_labels:
+        other = by_label[label]
+        for side in (bbc, gdn):
+            assert not evidence_matches(
+                subject_title=side[0], subject_description=side[1],
+                candidate_title=other[0], candidate_description=other[1],
+            ), f"{side[0]} x {other[0]} must not corroborate"
+        signals = matching_signals(
+            subject_title=bbc[0], subject_description=bbc[1],
+            candidate_title=other[0], candidate_description=other[1],
+        )
+        assert signals["matched"] is False
+        assert signals["rule"] != "shared_single_word_entity_and_event_concept"
+
+    # The two existential-risk stories ALSO share the organism and the "warnings"
+    # context with each other; without a concept they still stay apart.
+    res10 = by_label["researcher-10"]
+    more = by_label["more-researchers"]
+    assert not evidence_matches(
+        subject_title=res10[0], subject_description=res10[1],
+        candidate_title=more[0], candidate_description=more[1],
+    )
+
+
+def test_lexical_normalization_folds_bioweapons_variants():
+    """Requirement #4: deterministic normalization -- plural/singular, compounds,
+    hyphen/spaced variants and bioweaponry all fold to one concept; no LLM."""
+    from newsforge.verify.claims import _title_event_concepts, evidence_matches
+
+    for title in (
+        "Anthropic blocks attempts to make biological weapons",
+        "Anthropic blocks attempts to make bio-weapons",
+        "Anthropic blocks attempts to make bio weapons",
+        "Anthropic blocks an effort to produce bioweapons",
+        "Anthropic says third-party models could be misused for bioweaponry",
+    ):
+        assert "biological_weapons" in _title_event_concepts(title), title
+
+    assert evidence_matches(
+        subject_title="Anthropic blocks attempts to make bio-weapons",
+        subject_description=None,
+        candidate_title="Anthropic details misuse of its models for bioweaponry",
+        candidate_description=None,
+    )
+
+
+def test_bioweapons_match_survives_generic_word_removal_but_needs_concept():
+    """Requirement #9 (sensitivity): deleting the accidental ``former`` wording does
+    NOT flip the true match; deleting the event concept from the title DOES."""
+    from newsforge.verify.claims import evidence_matches
+
+    # Descriptions stripped of every "former" construction: still the SAME event,
+    # still matched through the TITLE concept (biology is the signal, not former).
+    assert evidence_matches(
+        subject_title=_BBC_BIOWEAPONS,
+        subject_description="The revelations are in Anthropic's threat intelligence report.",
+        candidate_title=_GUARDIAN_BIOWEAPONS,
+        candidate_description="Report published by the company on Thursday.",
+    )
+    # Remove the shared event concept from the subject TITLE: no match anymore.
+    assert not evidence_matches(
+        subject_title="Anthropic blocks possible attempt to use AI for a hostile campaign",
+        subject_description=_BBC_BIOWEAPONS_DESC,
+        candidate_title=_GUARDIAN_BIOWEAPONS,
+        candidate_description=_GUARDIAN_BIOWEAPONS_DESC,
+    )

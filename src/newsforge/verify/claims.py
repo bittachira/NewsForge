@@ -106,7 +106,7 @@ _GENERIC_SIGNAL_WORDS: frozenset[str] = frozenset({
     "leading", "popular", "advanced", "advancements", "models", "model", "tools",
     "tool", "features", "feature", "offers", "offer", "brings", "bring", "makes",
     "make", "work", "works", "working", "lives", "living", "life", "real",
-    "actual", "same", "different", "other", "another",
+    "actual", "same", "different", "other", "another", "former",
     # Generic risk/safety vocabulary shared by every Anthropic-style safety story.
     "threat", "threats", "warn", "warns", "warned", "warning", "warnings", "risk",
     "risks", "unsafe", "perils", "concern", "concerns", "fear", "fears", "danger",
@@ -127,6 +127,30 @@ _YEAR_TOKEN_RE = re.compile(r"^(?:19|20)\d{2}$")
 # Pure-numeric tokens (model numbers, specs, prices, counts) carry no event signal.
 _NUMERIC_TOKEN_RE = re.compile(r"^[0-9]+$")
 
+# EVENT CONCEPTS: curated phrases that pinpoint WHAT the event is about. They are
+# matched from TITLES only via deterministic lexical normalization (plural/singular,
+# compound/hyphen/spaced variants, punctuation) with no LLM and no fuzziness. A shared
+# concept is the event-specific signal that lets a shared SINGLE-WORD entity
+# corroborate; the generic risk/safety topic words (AI safety, existential risk,
+# threat report) are deliberately NOT concepts, so Anthropic AI-risk stories can never
+# corroborate each other through them.
+_EVENT_CONCEPT_PATTERNS: dict[str, re.Pattern[str]] = {
+    # "biological weapons" == "bio-weapons" == "bio weapons" == "bioweapon(s)/bioweaponry"
+    "biological_weapons": re.compile(
+        r"\bbioweapons?\b|\bbioweaponry\b|\bbio[\s-]?weapons?\b|\bbiological weapons?\b",
+        re.IGNORECASE,
+    ),
+    "chemical_weapons": re.compile(r"\bchemical weapons?\b", re.IGNORECASE),
+    "nuclear_weapons": re.compile(r"\bnuclear weapons?\b|\bnukes?\b", re.IGNORECASE),
+    "missiles": re.compile(r"\bmissiles?\b", re.IGNORECASE),
+    "bombs": re.compile(r"\bbombs?\b", re.IGNORECASE),
+    "pathogens": re.compile(r"\bpathogens?\b", re.IGNORECASE),
+    "cyber_attacks": re.compile(r"\bcyberattacks?\b|\bcyber attacks?\b", re.IGNORECASE),
+    "child_sexual_abuse": re.compile(r"\bchild sexual abuse\b|\bcsam\b", re.IGNORECASE),
+    # Real cross-source low-risk pair observed in the 2026-09 live feeds.
+    "mathematical_problems": re.compile(r"\bmath(?:s)? problems?\b|\bmathematical problems?\b", re.IGNORECASE),
+}
+
 # HTML tags are stripped before any matching so markup can never leak tokens.
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 
@@ -136,10 +160,19 @@ _HTML_TAG_RE = re.compile(r"<[^>]+>")
 # and an "Apple" product review would wrongly merge). Corroboration therefore needs:
 #
 #   * a shared MULTI-WORD proper noun (e.g. "Central Bank")  -> direct match; or
-#   * a shared SINGLE proper noun AND >= 1 shared significant (generic-filtered)
-#     non-entity token drawn from the item's TITLE plus its DESCRIPTION. The
-#     description is *controlled support*: it may supply the extra signal ("former",
-#     "missiles") but never the event identity on its own.
+#   * a shared SINGLE proper noun AND >= 1 EVENT CONCEPT present in BOTH titles
+#     (e.g. BBC "Anthropic ... biological weapons" x Guardian "Anthropic ...
+#     bioweapons" via the deterministic normalization ``biological_weapons``).
+#
+# The description never supplies the corroborating signal: generic accidentals such
+# as "former" (or "make"/"company"/"researcher"...) cannot bridge two items, so every
+# match stays explainable. A single-word name followed by generic risk/safety
+# vocabulary ("AI safety", "existential risk") or product-review words never matches.
+#
+# Accepted boundary: two DIFFERENT events about the SAME object at the same organism
+# (e.g. an "Anthropic ... biological weapons safeguards" policy story vs an Anthropic
+# bioweapons misuse report) share the concept and are read as one news thread. Finer
+# action-stage semantics are deliberately out of scope for this lexical predicate.
 #
 # Without a shared entity there is NO fallback (the old global ">= 3 shared tokens"
 # rule is gone). Entity extraction only considers capitalized words inside the TITLE,
@@ -199,6 +232,94 @@ def _title_entities(title: str | None) -> set[str]:
     return phrases
 
 
+def _title_event_concepts(title: str | None) -> set[str]:
+    """Event concepts in a TITLE, matched by deterministic lexical normalization.
+
+    Each concept fires only when one of its exact normalized phrasings appears inside
+    the title (plural/singular, compound/hyphened/spaced variants are folded by the
+    concept regex; punctuation/HTML/boilerplate are already cleaned). Concepts are
+    event-specific ("biological weapons"), never topic-generic ("AI safety"), so a
+    shared concept is a *justifiable* signal that a shared single-word entity
+    describes the SAME event. Pure regex state machine: no LLM, no thresholds.
+    """
+    if not title:
+        return set()
+    cleaned = _clean_text(title)
+    return {
+        concept
+        for concept, pattern in _EVENT_CONCEPT_PATTERNS.items()
+        if pattern.search(cleaned)
+    }
+
+
+def matching_signals(
+    *,
+    subject_title: str | None,
+    subject_description: str | None,
+    candidate_title: str | None,
+    candidate_description: str | None,
+) -> dict:
+    """Explainable same-event verdict plus the signals that justify it.
+
+    Cross-source items only corroborate each other when they describe the SAME event.
+    Entity identity comes from the TITLE; a single-word entity is confirmed only by a
+    shared EVENT CONCEPT in both titles. Matches (all deterministic, no LLM):
+
+    * ``shared_multiword_entity``: both titles share a MULTI-WORD proper noun
+      (e.g. ``Central Bank``) -- identity alone is strong enough.
+    * ``shared_single_word_entity_and_event_concept``: both titles share a SINGLE
+      proper noun AND at least one event concept (BBC "Anthropic ... biological
+      weapons" x Guardian "Anthropic ... bioweapons" via ``biological_weapons``).
+
+    Everything else returns ``matched`` False. A shared single-word name plus generic
+    risk/safety vocabulary ("AI safety", "existential risk") or an accidental word
+    like ``former`` never matches, and the DESCRIPTION is never used to supply the
+    missing signal.
+
+    Returns a dict with the verdict plus an auditable breakdown of the signals:
+    ``shared_entities``, ``subject_title_concepts``, ``candidate_title_concepts``,
+    ``shared_concepts`` and the ``rule`` that was applied.
+    """
+    reason = {
+        "matched": False,
+        "rule": "no_title",
+        "shared_entities": [],
+        "subject_title_concepts": [],
+        "candidate_title_concepts": [],
+        "shared_concepts": [],
+    }
+    if not subject_title or not candidate_title:
+        return reason
+
+    shared_entities = sorted(
+        _title_entities(subject_title) & _title_entities(candidate_title)
+    )
+    reason["shared_entities"] = shared_entities
+    if not shared_entities:
+        reason["rule"] = "no_shared_entity"
+        return reason
+
+    subject_concepts = _title_event_concepts(subject_title)
+    candidate_concepts = _title_event_concepts(candidate_title)
+    reason["subject_title_concepts"] = sorted(subject_concepts)
+    reason["candidate_title_concepts"] = sorted(candidate_concepts)
+    shared_concepts = subject_concepts & candidate_concepts
+    reason["shared_concepts"] = sorted(shared_concepts)
+
+    if any(len(p.split()) >= _MULTI_WORD_MIN_PARTS for p in shared_entities):
+        reason["matched"] = True
+        reason["rule"] = "shared_multiword_entity"
+        return reason
+
+    if shared_concepts:
+        reason["matched"] = True
+        reason["rule"] = "shared_single_word_entity_and_event_concept"
+        return reason
+
+    reason["rule"] = "shared_single_word_entity_without_event_concept"
+    return reason
+
+
 def evidence_matches(
     *,
     subject_title: str | None,
@@ -208,41 +329,17 @@ def evidence_matches(
 ) -> bool:
     """Deterministic predicate: do two cross-source items support the SAME event?
 
-    Cross-source items only corroborate each other when they describe the SAME event.
-    Entity identity comes from the TITLE; the description plays a strictly *controlled
-    support* role (it can supply the extra corroborating signal, never the identity).
-    A candidate matches when:
-
-    * both TITLES share a MULTI-WORD proper noun (e.g. ``Central Bank``); or
-    * both TITLES share a SINGLE proper noun AND the items share >= 1 significant
-      generic-filtered non-entity signal across title+description (e.g. BBC "Anthropic
-      blocks ... biological weapons" x Guardian "Anthropic details ... bioweapons"
-      corroborate via ``former``, while a Google investment story and a Google phone
-      review share only the name and do NOT).
-
-    Sentence-initial capitalized words ("Is", "Does"), ALL-CAPS acronyms (AI/UK/EU),
-    generic tech/business vocabulary, feed boilerplate and HTML markup are filtered out
-    before matching, so "3 shared words" alone NEVER matches. The predicate is
-    symmetric, pure and threshold-based (no LLM).
+    Thin boolean wrapper over :func:`matching_signals` for callers that only need the
+    verdict; use ``matching_signals`` whenever the justifying signals must be reported.
     """
-    if not subject_title or not candidate_title:
-        return False
-    shared_entities = _title_entities(subject_title) & _title_entities(candidate_title)
-    if not shared_entities:
-        return False
-
-    entity_words = set()
-    for phrase in shared_entities:
-        entity_words.update(phrase.split())
-
-    multi_word = {p for p in shared_entities if len(p.split()) >= _MULTI_WORD_MIN_PARTS}
-    if multi_word:
-        return True
-
-    # Single-entity match: need one shared non-entity signal from title+description.
-    subject_pool = (_significant_set(subject_title) | _significant_set(subject_description)) - entity_words
-    candidate_pool = (_significant_set(candidate_title) | _significant_set(candidate_description)) - entity_words
-    return bool(subject_pool & candidate_pool)
+    return bool(
+        matching_signals(
+            subject_title=subject_title,
+            subject_description=subject_description,
+            candidate_title=candidate_title,
+            candidate_description=candidate_description,
+        )["matched"]
+    )
 
 
 def _canonical_identity(text: str, story_id: str | None) -> str:
