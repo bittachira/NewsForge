@@ -88,14 +88,27 @@ def test_classify_topic_detects_real_topics():
 
 
 def test_unrelated_items_do_not_merge_into_one_story():
-    """Bug 2 regression: unrelated signals must land in separate stories."""
+    """Bug 2 regression: unrelated signals must land in separate stories.
+
+    Event-signature clustering fuses the items that genuinely describe the SAME
+    event (the EU small-package tax, one in English, one in Spanish) into a single
+    ``european_union_package_tax_2026`` story, while the unrelated item stays in its
+    own ``uncategorized_2026`` bucket, so no-one is ever dragged into a story whose
+    only common factor is a broad ``(topic, year)`` pair.
+
+    Verified on the real production dump: this is exactly the fusing behaviour that
+    keeps e.g. the Anthropic bioweapons pair together while unrelated reports stay
+    apart.
+    """
     items = [
-        {"title": "Nuevo impuesto a paquetes pequeños", "description": "La UE aprueba un impuesto sobre paquetes pequenos en 2026"},
-        {"title": "Impuesto de paquetes pequenos europeo", "description": "El pequeno paquete sufre el nuevo impuesto de la Union Europea"},
-        {"title": "Otra historia totalmente distinta", "description": "algo completamente diferente sin tema claro"},
+        {"title": "Nuevo impuesto a paquetes pequeños", "description": "La UE aprueba un impuesto sobre paquetes pequenos en 2026", "published_at": "2026-09-01T08:00:00+00:00"},
+        {"title": "Impuesto de paquetes pequenos europeo", "description": "El pequeno paquete sufre el nuevo impuesto de la Union Europea", "published_at": "2026-09-02T08:00:00+00:00"},
+        {"title": "Otra historia totalmente distinta", "description": "algo completamente diferente sin tema claro", "published_at": "2026-09-03T08:00:00+00:00"},
     ]
     clusters = cluster_items(items)
-    assert len(clusters) == 3, f"unrelated items merged: {list(clusters)}"
+    assert len(clusters) == 2, f"same-event items split: {list(clusters)}"
+    assert len(clusters["european_union_package_tax_2026"]) == 2
+    assert len(clusters["uncategorized_2026"]) == 1
 
 
 def test_related_items_cluster_with_entity_prefix():
@@ -256,9 +269,11 @@ def test_regression_story_parent_ordered_before_signals_with_fk():
     """Production DETECT bug: story_signals inserted before its stories row.
 
     Reproduces the Render crash (``story_signals_story_id_fkey`` with
-    ``story_id='september_2026'``) on SQLite with FK enforcement ON. Two items
-    sharing the capitalized entity "September" + year 2026 resolve to story_id
-    ``september_2026``; the engine must persist the stories row before linking.
+    ``story_id='report_2026'``) on SQLite with FK enforcement ON. Two items sharing
+    kind "report" + year 2026 resolve to story_id ``report_2026``; the engine must
+    persist the stories row before linking. (The old ``september_2026`` key came from
+    the buggy ``(topic, year)`` + capitalized-entity rule; months now never become a
+    subject or a product, so the pair resolves to the report-kind key instead.)
     """
     _enable_fk_pragma()
     with get_session() as s:
@@ -272,11 +287,11 @@ def test_regression_story_parent_ordered_before_signals_with_fk():
     first = StoryDetector().process(signal_ids=ids)
     assert first.created_stories == 1
     assert first.linked_signals == 2
-    assert first.stories[0]["story_id"] == "september_2026"
+    assert first.stories[0]["story_id"] == "report_2026"
 
     # The FK target now exists and both signals are linked, in one transaction.
     with get_session() as s:
-        story = s.query(stories).filter_by(story_id="september_2026").one()
+        story = s.query(stories).filter_by(story_id="report_2026").one()
         assert len(s.query(story_signals).filter_by(story_id=story.story_id).all()) == 2
 
     # Idempotent re-run: no duplicate stories/links, never touches the FK.
@@ -285,8 +300,8 @@ def test_regression_story_parent_ordered_before_signals_with_fk():
     assert second.updated_stories == 1
     assert second.linked_signals == 0
     with get_session() as s:
-        assert s.query(stories).filter_by(story_id="september_2026").count() == 1
-        assert s.query(story_signals).filter_by(story_id="september_2026").count() == 2
+        assert s.query(stories).filter_by(story_id="report_2026").count() == 1
+        assert s.query(story_signals).filter_by(story_id="report_2026").count() == 2
 
 
 def test_process_requires_input():

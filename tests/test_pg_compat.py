@@ -183,7 +183,7 @@ def test_detect_persists_story_before_story_signals_under_pg_fk(pg_dsn):
     """Production DETECT regression: story_signals must never precede its stories row.
 
     Reproduces the exact Render crash (``story_signals_story_id_fkey``,
-    ``story_id='september_2026'``). PostgreSQL ALWAYS enforces FKs, so any
+    ``story_id='report_2026'``). PostgreSQL ALWAYS enforces FKs, so any
     query-invoked autoflush that persists signals before their parent story fails
     here with an IntegrityError. The shared default engine is swapped to PG for
     the full ``StoryDetector.process`` round-trip, then restored.
@@ -216,18 +216,18 @@ def test_detect_persists_story_before_story_signals_under_pg_fk(pg_dsn):
             first = StoryDetector().process(signal_ids=seed_ids)
             assert first.created_stories == 1
             assert first.linked_signals == 2
-            assert first.stories[0]["story_id"] == "september_2026"
+            assert first.stories[0]["story_id"] == "report_2026"
 
             with session_mod.get_session() as s:
-                assert s.query(stories).filter_by(story_id="september_2026").count() == 1
-                assert s.query(story_signals).filter_by(story_id="september_2026").count() == 2
+                assert s.query(stories).filter_by(story_id="report_2026").count() == 1
+                assert s.query(story_signals).filter_by(story_id="report_2026").count() == 2
 
             # Idempotent re-run under the same FK regime: no duplicates.
             second = StoryDetector().process(signal_ids=seed_ids)
             assert second.created_stories == 0
             assert second.updated_stories == 1
             with session_mod.get_session() as s:
-                assert s.query(story_signals).filter_by(story_id="september_2026").count() == 2
+                assert s.query(story_signals).filter_by(story_id="report_2026").count() == 2
     finally:
         # Never leave the PostgreSQL engine as the shared default.
         if session_mod._default_engine is not None:

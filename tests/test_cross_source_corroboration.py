@@ -464,8 +464,16 @@ def test_cross_source_same_event_persists_two_evidence_rows():
 
 
 # --------------------------------------------------------------------------- #
-# No false corroboration: two items in the SAME story but about DIFFERENT events
-# must each keep exactly one evidence row and never reach the publish bar.
+# No false corroboration: unrelated items must NEVER share a story and never
+# cross-corroborate.
+#
+# With event-signature clustering the two headlines below no longer collapse into
+# one broad "technology" bucket; each forms its OWN story (uk_ai_safety_2026 and
+# google_investment_2026). The guard this test is named for still stands: even if
+# two unrelated items ever fell into one residual story, each claim would keep
+# exactly one evidence row and never reach the publish bar. The RED "dangerous AI"
+# claim makes the UK story WAIT; the Google item being a separate story means the
+# single RED claim can no longer contaminate unrelated technology events.
 # --------------------------------------------------------------------------- #
 def test_same_story_unrelated_items_stay_single_source():
     with get_session() as s:
@@ -482,20 +490,65 @@ def test_same_story_unrelated_items_stay_single_source():
 
     result = _run([item_a, item_b])
 
-    assert result["stories_detected"] == 1, "both items must share the technology story"
-    outcome = result["outcomes"][0]
-    bk = outcome.business_key
+    # Event signatures keep the two events apart: no more continue_technology_2026.
+    assert result["stories_detected"] == 2, "unrelated events must not share a story"
+    out_by_key = {o.business_key: o for o in result["outcomes"]}
+    assert set(out_by_key) == {"uk_ai_safety_2026", "google_investment_2026"}, list(out_by_key)
 
     with get_session() as s:
-        claim_rows = s.query(db.claims).filter_by(story_id=bk).all()
+        for bk in ("uk_ai_safety_2026", "google_investment_2026"):
+            claim_rows = s.query(db.claims).filter_by(story_id=bk).all()
+            assert len(claim_rows) == 1, f"{bk}: exactly one claim"
+            for claim in claim_rows:
+                ev_rows = s.query(db.claim_evidence).filter_by(claim_id=str(claim.id)).all()
+                assert len(ev_rows) == 1, "unrelated items must NOT cross-corroborate"
+
+    for bk in ("uk_ai_safety_2026", "google_investment_2026"):
+        for te in out_by_key[bk].decision["trust_evaluations"]:
+            assert te["independent_corroboration"] == 1
+            assert te["total_evidence"] == 1
+
+    # The RED "dangerous AI" claim blocks the UK story outright; because the Google
+    # event is a SEPARATE story, the RED claim cannot hold it back either.
+    assert out_by_key["uk_ai_safety_2026"].final_status == "WAIT"
+
+
+# --------------------------------------------------------------------------- #
+# Residual-digest guard: two unrelated bulletins can legally land in the same
+# ``uncategorized_<year>`` story (the only remaining coarse bucket), but the stuff
+# of each claim is single-source -- boilerplate can never fabricate corroboration.
+# At TIER_4 the story stays below the trust bar, so nothing auto-publishes.
+# --------------------------------------------------------------------------- #
+def test_residual_digest_bucket_never_fabricates_corroboration():
+    with get_session() as s:
+        _seed_source(s, id="src-eve", tier="TIER_4")
+        _seed_source(s, id="src-morn", tier="TIER_4")
+        item_eve = _seed_item(
+            s, source_id="src-eve",
+            title="Latest news bulletin | September 11th, 2026 - Evening",
+        )
+        item_morn = _seed_item(
+            s, source_id="src-morn",
+            title="Latest news bulletin | September 12th, 2026 - Morning",
+        )
+
+    result = _run([item_eve, item_morn])
+
+    assert result["stories_detected"] == 1, "both bulletins share the residual bucket"
+    outcome = result["outcomes"][0]
+    assert outcome.business_key == "uncategorized_2026"
+    assert result["outcomes"][0].final_status != "PUBLISHED"
+
+    with get_session() as s:
+        claim_rows = s.query(db.claims).filter_by(story_id="uncategorized_2026").all()
         assert len(claim_rows) == 2
         for claim in claim_rows:
             ev_rows = s.query(db.claim_evidence).filter_by(claim_id=str(claim.id)).all()
-            assert len(ev_rows) == 1, "unrelated items must NOT cross-corroborate"
+            assert len(ev_rows) == 1, "boilerplate bulletins must NOT corroborate each other"
 
     for te in outcome.decision["trust_evaluations"]:
         assert te["independent_corroboration"] == 1
-    assert outcome.final_status != "PUBLISHED"
+        assert te["total_evidence"] == 1
 
 
 # --------------------------------------------------------------------------- #
