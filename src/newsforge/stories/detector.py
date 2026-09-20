@@ -143,6 +143,8 @@ KNOWN_ENTITIES: list[tuple[str, str]] = [
     ("eu", "european_union"),
     ("ue", "european_union"),
     ("uk", "uk"),
+    ("german", "germany"),
+    ("germans", "germany"),
 ]
 _KNOWN_ENTITIES = sorted(KNOWN_ENTITIES, key=lambda kv: -len(kv[0]))
 _ENTITY_RE = [
@@ -344,6 +346,12 @@ _EVENT_CONCEPT_PATTERNS: dict[str, list[re.Pattern]] = {
     "package_tax": [
         re.compile(r"package tax(?:es)?\b"), re.compile(r"small package"),
         re.compile(r"impuesto.{0,12}paquet"), re.compile(r"\bpaquet\w*"),
+    ],
+    "elections": [
+        re.compile(r"\belections?\b"),
+        re.compile(r"\bvoting\b"),
+        re.compile(r"\bpolls?\b"),
+        re.compile(r"\bgo(?:es)?\s+to\s+the\s+polls\b"),
     ],
 }
 

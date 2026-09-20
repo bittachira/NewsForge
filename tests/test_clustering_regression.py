@@ -274,3 +274,84 @@ def test_red_bioweapons_story_does_not_contaminate_separate_maths_story():
             for claim in rows:
                 ev = s.query(db.claim_evidence).filter_by(claim_id=str(claim.id)).all()
                 assert len(ev) == expect_ev, (bk, claim.claim_id)
+
+
+# --------------------------------------------------------------------------- #
+# German elections: entity canonicalization + elections concept
+# Covers the 20/09/2026 state elections (Berlin, Mecklenburg-Western Pomerania).
+# --------------------------------------------------------------------------- #
+_BBC_GER_ELEC = "German elections under way which could decide fate of Chancellor Merz"
+_AJ_GER_ELEC = "Germany's Berlin, Mecklenburg-Western Pomerania states head to polls"
+_NYT_GER_ELEC = "Germans Are Voting Again, Amid a Far-Right Surge. Here's What to Watch."
+_GER_NONELEC = "German automaker recalls 50,000 vehicles over brake defect"
+_FRANCE_ELEC = "French elections underway amid far-right surge"
+_UKRAINE_ATTACK = "Ukraine drone attack on Moscow region kills two"
+
+
+def test_german_elections_all_sources_same_story():
+    """Three TIER-2 sources covering German state elections -> one story."""
+    keys = _keys_for([_BBC_GER_ELEC, _AJ_GER_ELEC, _NYT_GER_ELEC])
+    assert keys[_BBC_GER_ELEC] == "germany_elections_2026"
+    assert keys[_AJ_GER_ELEC] == "germany_elections_2026"
+    assert keys[_NYT_GER_ELEC] == "germany_elections_2026"
+    assert len(cluster_items([_item(_BBC_GER_ELEC), _item(_AJ_GER_ELEC), _item(_NYT_GER_ELEC)])) == 1
+
+
+def test_german_elections_order_independence():
+    """Same three sources in different input orders produce the same STORY_ID."""
+    order_a = _keys_for([_BBC_GER_ELEC, _AJ_GER_ELEC, _NYT_GER_ELEC])
+    order_b = _keys_for([_NYT_GER_ELEC, _BBC_GER_ELEC, _AJ_GER_ELEC])
+    order_c = _keys_for([_AJ_GER_ELEC, _NYT_GER_ELEC, _BBC_GER_ELEC])
+    assert order_a == order_b == order_c
+
+
+def test_germany_non_election_different_story():
+    """A German non-election article must NOT merge with the elections story."""
+    keys = _keys_for([_BBC_GER_ELEC, _GER_NONELEC])
+    assert keys[_BBC_GER_ELEC] == "germany_elections_2026"
+    assert keys[_GER_NONELEC] == "germany_2026"
+    assert keys[_BBC_GER_ELEC] != keys[_GER_NONELEC]
+
+
+def test_french_elections_not_merged_with_germany():
+    """Elections in France must stay separate from German elections."""
+    keys = _keys_for([_BBC_GER_ELEC, _FRANCE_ELEC])
+    assert keys[_BBC_GER_ELEC] == "germany_elections_2026"
+    assert keys[_FRANCE_ELEC] == "french_elections_2026"
+    assert keys[_BBC_GER_ELEC] != keys[_FRANCE_ELEC]
+
+
+def test_german_elections_corroboration_from_three_sources():
+    """Three independent sources on German elections give corroboration = 3."""
+    cluster = cluster_items(
+        [_item(_BBC_GER_ELEC), _item(_AJ_GER_ELEC), _item(_NYT_GER_ELEC)]
+    )
+    assert len(cluster) == 1
+    story_key = next(iter(cluster))
+    assert story_key == "germany_elections_2026"
+    assert len(cluster[story_key]) == 3
+
+
+def test_german_non_election_and_ukraine_stay_separate():
+    """German non-election and Ukraine attack are distinct stories."""
+    keys = _keys_for([_GER_NONELEC, _UKRAINE_ATTACK])
+    assert keys[_GER_NONELEC] == "germany_2026"
+    assert keys[_UKRAINE_ATTACK] == "ukraine_attack_2026"
+    assert keys[_GER_NONELEC] != keys[_UKRAINE_ATTACK]
+
+
+def test_all_six_german_items_deterministic():
+    """All six items across categories produce stable, non-overlapping keys."""
+    titles = [_BBC_GER_ELEC, _AJ_GER_ELEC, _NYT_GER_ELEC, _GER_NONELEC, _FRANCE_ELEC, _UKRAINE_ATTACK]
+    keys = _keys_for(titles)
+    # Exactly 4 distinct stories: 3 election sources fuse, 3 others stay separate
+    assert len(set(keys.values())) == 4
+    expected = {
+        _BBC_GER_ELEC: "germany_elections_2026",
+        _AJ_GER_ELEC: "germany_elections_2026",
+        _NYT_GER_ELEC: "germany_elections_2026",
+        _GER_NONELEC: "germany_2026",
+        _FRANCE_ELEC: "french_elections_2026",
+        _UKRAINE_ATTACK: "ukraine_attack_2026",
+    }
+    assert keys == expected
