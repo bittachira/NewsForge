@@ -349,6 +349,16 @@ def run_pipeline(
                       duration_ms=_ms(t0), run_id=ctx.run_id,
                       request_id=ctx.request_id)
 
+            # Propagate the aggregate trust from P3 verification to the story row,
+            # replacing the P2 tier-baseline proxy with the evidence-backed score.
+            verified_trust = verification.get("trust_score")
+            if verified_trust is not None:
+                with get_session() as session:
+                    story_row = session.query(stories).filter_by(story_id=bk).first()
+                    if story_row is not None:
+                        story_row.trust_score = int(round(verified_trust))
+                        session.commit()
+
             # Phase 4: Decision Gate
             decision = verification["decision"]
             if decision != "PUBLISH":

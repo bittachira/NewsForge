@@ -211,11 +211,14 @@ def record_decision(
     target_type: str,
     target_id: str,
     risk_level: Optional[str] = None,
+    trust_score: Optional[float] = None,
     decision_result: tuple[str, list[str], str] | None = None,
 ) -> Optional[dict]:
     """Persist the CONTENT DECISION ENGINE outcome (§10, §14).
 
     ``decision_result`` is ``(decision, reasons, human_loop_verdict)`` from :func:`decide`.
+    ``trust_score`` is the aggregate trust used by :func:`decide` — persisted so the
+    decision row is self-contained and auditable without re-deriving the evaluation.
     Idempotent by (target_type, target_id): on a re-run the existing row is UPDATED in place
     when the outcome changed (e.g. a later run corroborates previously single-source evidence
     and the story moves WAIT -> PUBLISH), so the persisted decision never silently diverges
@@ -229,7 +232,7 @@ def record_decision(
         "target_id": target_id,
         "decision": decision,
         "risk_level": _risk_from_verdict(verdict),
-        "trust_score": 0,  # filled by caller via run_verification; kept valid here
+        "trust_score": int(round(trust_score)) if trust_score is not None else 0,
         "reasons_json": to_jsonable(reasons),
         "human_override": False,
         "policy_version": POLICY_VERSION,
@@ -422,6 +425,7 @@ def run_verification(*, claims_specs: Iterable[dict], story_id: Optional[str] = 
             target_type="STORY",
             target_id=story_id or "unknown",
             risk_level=story_risk,
+            trust_score=aggregate_trust,
             decision_result=decision_result,
         )
         store_trust_evaluations(session, trust_evals)
