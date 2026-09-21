@@ -134,6 +134,7 @@ def _article_view(session, slug: str) -> Optional[dict]:
         return None
     pub = (session.query(publications)
            .filter_by(story_id=str(story.story_id), status=PublicationStatus.COMPLETED.value)
+           .filter(publications.published_at.isnot(None))
            .order_by(publications.published_at.desc()).first())
     if pub is None:
         return None  # not published -> never rendered publicly

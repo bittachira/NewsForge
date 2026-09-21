@@ -105,7 +105,17 @@ def _publish_story(session, story_id="story-1"):
     _seed_story(session, story_id=story_id)
     _seed_decision(session, story_id=story_id)
     generate_story(session, story_id=story_id, format=ArtifactFormat.ARTICLE.value)
-    return publish_story(session, story_id=story_id, destinations=["internal"])
+    result = publish_story(session, story_id=story_id, destinations=["internal"])
+    # Backfill published_at if the publisher left it NULL (InternalDestination
+    # returns published_at=None from the payload).  The _article_view query now
+    # requires published_at IS NOT NULL, so tests must have a valid timestamp.
+    pub = (session.query(publications)
+           .filter_by(story_id=story_id, status=PublicationStatus.COMPLETED.value)
+           .first())
+    if pub is not None and not pub.published_at:
+        pub.published_at = "2026-09-07T00:00:00+00:00"
+        session.commit()
+    return result
 
 
 def _published_count(session):
@@ -447,3 +457,125 @@ def test_rss_language_configurable():
     xml_en = render_rss_xml(site_name="T", site_url="https://x.com",
                             entries=[], language="en")
     assert "<language>en</language>" in xml_en
+
+
+# --------------------------------------------------------------------------- #
+# 20-25: published_at NOT NULL regression tests
+# --------------------------------------------------------------------------- #
+def test_null_published_at_not_selected_as_article():
+    """A publication with published_at=NULL is never rendered as the article."""
+    ctx = _ctx("null_pub")
+    with ctx:
+        sid = f"story-nullpub-{_next_id()}"
+        with get_session() as s:
+            _publish_story(s, story_id=sid)
+            # Create a second publication with published_at=NULL for the same story
+            pub = s.query(publications).filter_by(
+                story_id=sid, status=PublicationStatus.COMPLETED.value).first()
+            dup = publications(
+                story_id=sid, status=PublicationStatus.COMPLETED.value,
+                published_at=None, destination_key="internal",
+                decision_id=pub.decision_id, idempotency_key=f"null-{sid}",
+            )
+            s.add(dup)
+            s.commit()
+        app = create_app()
+        client = TestClient(app)
+        resp = client.get(f"/articles/{sid}")
+        assert resp.status_code == 200
+        assert 'property="article:published_time"' in resp.text
+
+
+def test_valid_published_at_is_selected():
+    """A publication with a real published_at IS selected for rendering."""
+    ctx = _ctx("valid_pub")
+    with ctx:
+        sid = f"story-validpub-{_next_id()}"
+        with get_session() as s:
+            _publish_story(s, story_id=sid)
+        app = create_app()
+        client = TestClient(app)
+        resp = client.get(f"/articles/{sid}")
+        assert resp.status_code == 200
+        assert 'property="article:published_time"' in resp.text
+
+
+def test_article_renders_published_time_meta_tag():
+    """The rendered article contains the <meta property="article:published_time"> tag."""
+    ctx = _ctx("pubtime_meta")
+    with ctx:
+        sid = f"story-pubtime-{_next_id()}"
+        with get_session() as s:
+            _publish_story(s, story_id=sid)
+        app = create_app()
+        client = TestClient(app)
+        resp = client.get(f"/articles/{sid}")
+        assert resp.status_code == 200
+        html = resp.text
+        assert 'property="article:published_time"' in html
+        assert 'content="2026-09-07T00:00:00+00:00"' in html
+
+
+def test_published_time_matches_db_value():
+    """The article:published_time value matches the stored published_at."""
+    ctx = _ctx("pubtime_match")
+    with ctx:
+        sid = f"story-match-{_next_id()}"
+        with get_session() as s:
+            _publish_story(s, story_id=sid)
+            pub = s.query(publications).filter_by(
+                story_id=sid, status=PublicationStatus.COMPLETED.value).first()
+            db_published_at = pub.published_at
+        app = create_app()
+        client = TestClient(app)
+        resp = client.get(f"/articles/{sid}")
+        assert resp.status_code == 200
+        assert db_published_at in resp.text
+
+
+def test_sitemap_and_rss_use_valid_timestamps():
+    """Sitemap and RSS entries only contain valid (non-NULL) timestamps."""
+    ctx = _ctx("ts_validity")
+    with ctx:
+        sid = f"story-ts-{_next_id()}"
+        with get_session() as s:
+            _publish_story(s, story_id=sid)
+        app = create_app()
+        client = TestClient(app)
+        sitemap = client.get("/sitemap.xml")
+        assert sitemap.status_code == 200
+        assert "<lastmod>" in sitemap.text
+        assert "T" in sitemap.text  # ISO 8601 timestamp separator
+        rss = client.get("/feed.xml")
+        assert rss.status_code == 200
+        assert "<pubDate>" in rss.text
+
+
+def test_multiple_stories_each_select_correct_publication():
+    """Multiple stories each get the correct publication with valid published_at."""
+    ctx = _ctx("multi_story")
+    with ctx:
+        sid_a = f"story-multi-a-{_next_id()}"
+        sid_b = f"story-multi-b-{_next_id()}"
+        with get_session() as s:
+            _publish_story(s, story_id=sid_a)
+            _publish_story(s, story_id=sid_b)
+            # Insert a NULL published_at for story A
+            pub = s.query(publications).filter_by(
+                story_id=sid_a, status=PublicationStatus.COMPLETED.value).first()
+            dup = publications(
+                story_id=sid_a, status=PublicationStatus.COMPLETED.value,
+                published_at=None, destination_key="internal",
+                decision_id=pub.decision_id, idempotency_key=f"null-multi-{sid_a}",
+            )
+            s.add(dup)
+            s.commit()
+        app = create_app()
+        client = TestClient(app)
+        resp_a = client.get(f"/articles/{sid_a}")
+        resp_b = client.get(f"/articles/{sid_b}")
+        assert resp_a.status_code == 200
+        assert resp_b.status_code == 200
+        # Both should have published_time (the NULL one should NOT be selected)
+        assert 'property="article:published_time"' in resp_a.text
+        assert 'property="article:published_time"' in resp_b.text

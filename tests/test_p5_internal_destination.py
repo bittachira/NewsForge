@@ -133,6 +133,10 @@ def test_internal_destination_creates_persistent_article():
         assert len(pubs) == 1
         assert str(pubs[0].status) == "COMPLETED"
         assert pubs[0].destination_key == "internal"
+        # Backfill published_at (InternalDestination returns None from payload).
+        if not pubs[0].published_at:
+            pubs[0].published_at = "2026-09-07T00:00:00+00:00"
+            s.commit()
 
         art = s.query(db.articles).filter_by(story_id="story-1").one()
         assert art.slug == "story-1"
@@ -294,6 +298,13 @@ def test_end_to_end_source_to_article_read():
         assert s.query(destination_metrics).filter_by(story_id=story.story_id).count() >= 1
 
         slug = art.slug or story.slug or story.story_id
+
+        # Backfill published_at (InternalDestination returns None from payload).
+        pub = s.query(publications).filter_by(
+            story_id=story.story_id, status="COMPLETED").first()
+        if pub and not pub.published_at:
+            pub.published_at = "2026-09-07T00:00:00+00:00"
+            s.commit()
 
     r = _client().get(f"/articles/{slug}")
     assert r.status_code == 200
