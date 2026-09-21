@@ -406,7 +406,9 @@ def test_each_ad_position_resolves_slot_id_independently():
     for pos in DEFAULT_POSITIONS:
         slot = AdSlot(slot_key=pos.lower(), placement=pos)
         html = provider.render_slot(slot)
-        assert "ad-slot--adsense" in html
+        assert '<ins class="adsbygoogle"' in html
+        assert 'data-ad-client="ca-pub-123"' in html
+        assert f'data-ad-slot="' in html
 
     no_id_provider = AdSenseProvider(client_id="ca-pub-123", slot_ids={})
     assert no_id_provider.is_configured() is False

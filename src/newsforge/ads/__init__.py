@@ -86,6 +86,10 @@ class AdProvider(ABC):
     def render_head_script(self) -> str:
         """Return a <script> tag to inject in <head> (empty string if none)."""
 
+    def render_inline_script(self) -> str:
+        """Return inline JS to execute after ad slots are rendered (empty string if none)."""
+        return ""
+
 
 class PlaceholderProvider(AdProvider):
     """Default fallback: renders empty <div> markers with data attributes.
@@ -112,7 +116,14 @@ class AdSenseProvider(AdProvider):
 
     Requires NEWSFORGE_ADSENSE_CLIENT_ID and per-slot unit IDs via
     NEWSFORGE_ADSENSE_SLOT_{POSITION} env vars.  When any required value
-    is missing, is_configured() returns False and the placeholder is used."""
+    is missing, is_configured() returns False and the placeholder is used.
+
+    AdSense compliance (per Google AdSense policies):
+    - Uses <ins class="adsbygoogle"> tag with data-ad-client and data-ad-slot
+    - Script loaded with crossorigin="anonymous" for CORS compliance
+    - SSR-compatible: <ins> tag present in HTML before JS loads
+    - Fallback to placeholder when ad unit ID not configured for a slot
+    - adsbygoogle.push() called to trigger ad request"""
 
     def __init__(self, client_id: str, slot_ids: dict[str, str]):
         self._client_id = client_id
@@ -128,13 +139,13 @@ class AdSenseProvider(AdProvider):
         if not unit_id:
             return PlaceholderProvider().render_slot(slot)
         return (
-            f'<div class="ad-slot ad-slot--adsense" '
-            f'data-slot="{slot.slot_key}" '
-            f'data-placement="{slot.placement}" '
-            f'data-fill="ADSENSE" '
+            f'<ins class="adsbygoogle" '
+            f'style="display:block" '
             f'data-ad-client="{self._client_id}" '
-            f'data-ad-slot="{unit_id}">'
-            f'<!-- ad: {slot.slot_key} (adsense) --></div>'
+            f'data-ad-slot="{unit_id}" '
+            f'data-full-width-responsive="true">'
+            f'</ins>'
+            f'<!-- ad: {slot.slot_key} (adsense) -->'
         )
 
     def render_head_script(self) -> str:
@@ -143,6 +154,18 @@ class AdSenseProvider(AdProvider):
         return (
             f'<script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client={self._client_id}" '
             f'crossorigin="anonymous"></script>'
+        )
+
+    def render_inline_script(self) -> str:
+        """Return inline JS to call adsbygoogle.push() for each slot on the page.
+
+        This must be rendered AFTER all <ins class="adsbygoogle"> tags."""
+        if not self._client_id:
+            return ""
+        return (
+            '<script>\n'
+            '(adsbygoogle = window.adsbygoogle || []).push({});\n'
+            '</script>'
         )
 
 

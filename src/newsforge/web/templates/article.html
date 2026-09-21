@@ -15,6 +15,7 @@
   gtag('config', '{{ analytics_id }}');
 </script>
 {% endif %}
+{{ ad_head_script|safe }}
 {% endblock %}
 {% block title %}{{ title }} -- {{ brand }}{% endblock %}
 {% block content %}
@@ -44,4 +45,5 @@
   </section>
   {% endif %}
 </article>
+{{ ad_inline_script|safe }}
 {% endblock %}

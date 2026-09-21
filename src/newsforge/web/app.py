@@ -149,10 +149,14 @@ def _article_view(session, slug: str) -> Optional[dict]:
     )
     sections = _article_sections(session, story)
     # Insert ad-slot markers into the body sections using the configured provider.
+    ad_head_script = ""
+    ad_inline_script = ""
     try:
         active_slots = load_active_slots(session)
         ad_provider = get_provider()
         sections = insert_ad_slots(sections, active_slots=active_slots, provider=ad_provider)
+        ad_head_script = ad_provider.render_head_script()
+        ad_inline_script = ad_provider.render_inline_script()
     except Exception:  # noqa: BLE001 -- ad-slot failure must never block rendering
         pass
     # Related stories: up to 5 stories with the same topic, excluding this one.
@@ -185,6 +189,8 @@ def _article_view(session, slug: str) -> Optional[dict]:
         "analytics_id": analytics_id,
         "lang": lang,
         "topic": story.topic,
+        "ad_head_script": ad_head_script,
+        "ad_inline_script": ad_inline_script,
     }
 
 
@@ -351,6 +357,30 @@ def create_app() -> FastAPI:
         except Exception:  # noqa: BLE001
             status["error"] = "scheduler module not available"
         return JSONResponse(content=status)
+
+    @app.get("/admin/ads/status")
+    def ads_status(request: Request):
+        """Ad monetization status (admin-gated). Returns provider, slots, and metrics.
+
+        Only reports REAL data — never fabricates metrics when no provider
+        is configured or no events have been recorded."""
+        if not _internal_allowed(request):
+            raise HTTPException(status_code=403, detail="forbidden")
+        from newsforge.ads import AdConfig, get_provider, load_active_slots
+        from newsforge.analytics.ads import get_ad_metrics
+        cfg = AdConfig()
+        provider = get_provider()
+        with get_session() as s:
+            slots = load_active_slots(s)
+            metrics = get_ad_metrics(s)
+        return JSONResponse(content={
+            "provider": cfg.provider,
+            "provider_configured": provider.is_configured(),
+            "slots_count": len(slots),
+            "slots": slots,
+            "metrics": metrics,
+            "note": "Metrics only include real recorded events. No synthetic data.",
+        })
 
     @app.get("/health", response_model=dict)
     def health_check():
