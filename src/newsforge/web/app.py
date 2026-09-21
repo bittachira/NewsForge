@@ -366,8 +366,9 @@ def create_app() -> FastAPI:
         is configured or no events have been recorded."""
         if not _internal_allowed(request):
             raise HTTPException(status_code=403, detail="forbidden")
-        from newsforge.ads import AdConfig, get_provider, load_active_slots
+        from newsforge.ads import get_provider, load_active_slots
         from newsforge.analytics.ads import get_ad_metrics
+        from newsforge.config import AdConfig
         cfg = AdConfig()
         provider = get_provider()
         with get_session() as s:
