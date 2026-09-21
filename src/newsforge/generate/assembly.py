@@ -81,9 +81,23 @@ def _sections_for(fmt: str, story: dict, used: list) -> list:
     intro = (story.get("summary") or "").strip()
 
     if fmt == ArtifactFormat.ARTICLE.value:
-        sections = [{"type": "intro", "text": intro or f"{title}."}]
+        sections: list[dict] = [{"type": "intro", "text": intro or f"{title}."}]
         for c in used:
             sections.append({"type": "fact", "claim_id": c["claim_id"], "text": c["text"]})
+            # Source attribution: embed the real source(s) behind each fact.
+            srcs = c.get("evidence_sources") or []
+            if srcs:
+                names = sorted({s["name"] for s in srcs if s.get("name")})
+                if names:
+                    sections.append({
+                        "type": "source_attribution",
+                        "text": f"Source{'s' if len(names) > 1 else ''}: {', '.join(names)}.",
+                    })
+        sections.append({
+            "type": "footer",
+            "text": f"This article was compiled from {len(used)} verified fact{'s' if len(used) != 1 else ''} "
+                    f"across {len({s['name'] for c in used for s in (c.get('evidence_sources') or []) if s.get('name')}) or 1} source{'s' if len({s['name'] for c in used for s in (c.get('evidence_sources') or []) if s.get('name')}) != 1 else ''}.",
+        })
         return sections
 
     if fmt == ArtifactFormat.BRIEF.value:
@@ -195,23 +209,39 @@ def _load_claims_payload(session, story_id: str) -> list:
     """Load the story's claims with their evidence links (READ ONLY).
 
     ``claim_evidence.claim_id`` references ``claims.id`` (PK), not the business key — so the
-    join target is ``str(row.id)``."""
+    join target is ``str(row.id)``.
+
+    Each claim now also carries ``evidence_sources`` — a deduplicated list of
+    ``{name, url}`` dicts derived from the linked source_items.  This lets the
+    deterministic generator embed real source attribution without I/O at
+    assembly time."""
     rows = session.query(claims).filter_by(story_id=str(story_id)).order_by(claims.claim_id).all()
     payload = []
     for row in rows:
         ev_rows = session.query(claim_evidence).filter_by(claim_id=str(row.id)).all()
         item_ids = sorted({str(e.source_item_id) for e in ev_rows})
         dates = []
+        sources_map: dict[str, dict] = {}  # source_item_id -> {name, url}
         for iid in item_ids:
             item = session.get(source_items, iid)
-            if item is not None and item.published_at:
-                dates.append(str(item.published_at))
+            if item is not None:
+                if item.published_at:
+                    dates.append(str(item.published_at))
+                # Resolve source name from the parent sources row.
+                src = session.get(sources, str(item.source_id)) if item.source_id else None
+                src_key = str(item.source_id) if item.source_id else iid
+                if src_key not in sources_map:
+                    sources_map[src_key] = {
+                        "name": (src.name if src else None) or "Unknown Source",
+                        "url": item.url or (src.url if src else None) or "",
+                    }
         payload.append({
             "claim_id": row.claim_id,
             "text": row.text,
             "has_evidence": len(ev_rows) > 0,
             "evidence_source_ids": item_ids,
             "evidence_dates": sorted(dates),
+            "evidence_sources": list(sources_map.values()),
         })
     return payload
 

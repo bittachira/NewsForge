@@ -266,7 +266,11 @@ def validate_production_config(cfg: DatabaseConfig | None = None) -> list[str]:
         problems.append("PRODUCTION requires NEWSFORGE_DATABASE_URL (postgresql://…), not a SQLite file path")
     if not os.getenv("NEWSFORGE_ADMIN_TOKEN"):
         problems.append("PRODUCTION requires NEWSFORGE_ADMIN_TOKEN")
-    if _env_bool("NEWSFORGE_MOCK_AI", True):
+    ai_enabled = _env_bool("NEWSFORGE_AI_ENABLED", True)
+    if not ai_enabled:
+        # AI disabled: deterministic generator is used; no provider checks needed.
+        pass
+    elif _env_bool("NEWSFORGE_MOCK_AI", True):
         problems.append("PRODUCTION requires NEWSFORGE_MOCK_AI=false")
     else:
         problems.extend(validate_ai_production_config())
@@ -283,8 +287,14 @@ def assert_mock_not_active_in_production(mock: bool) -> None:
 
     The main gate (:func:`assert_production_safe`) rejects ``NEWSFORGE_MOCK_AI=
     true`` at startup; this also protects any direct ``AiRouter(mock=True)`` use
-    (e.g. an offline job) that could otherwise run in MOCK against production."""
+    (e.g. an offline job) that could otherwise run in MOCK against production.
+
+    When ``NEWSFORGE_AI_ENABLED=false`` the AiRouter is never instantiated, so
+    this guard is never reached — but it is kept for defence-in-depth."""
     if _default_environment() == "production" and mock:
+        ai_enabled = _env_bool("NEWSFORGE_AI_ENABLED", True)
+        if not ai_enabled:
+            return  # AI disabled; AiRouter is never created
         raise RuntimeError(
             "NEWSFORGE_MOCK_AI=true is forbidden in a production environment; "
             "a real provider and credentials are required"
@@ -322,6 +332,10 @@ def assert_production_safe(cfg: DatabaseConfig | None = None) -> None:
 @dataclass(frozen=True)
 class AiConfig:
     """Model Router configuration. Provider-independent by design."""
+
+    # Master toggle: when False the pipeline uses DeterministicGenerator and
+    # never contacts any LLM.  AI becomes an optional editorial enhancement.
+    ai_enabled: bool = field(default_factory=lambda: _env_bool("NEWSFORGE_AI_ENABLED", True))
 
     # When MOCK is True the router returns deterministic, source-grounded output
     # and never touches the network — used for MVP demos, tests and offline runs.

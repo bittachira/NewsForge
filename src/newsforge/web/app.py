@@ -40,6 +40,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.templating import Jinja2Templates
 
 from newsforge.analytics import content_roi_query, total_ai_cost
+from newsforge.ads import insert_ad_slots, load_active_slots
 from newsforge.config import BrandConfig, assert_production_safe
 from newsforge.core.build_info import get_build_info
 from newsforge.core.logger import get_logger, log_event
@@ -134,26 +135,47 @@ def _article_view(session, slug: str) -> Optional[dict]:
            .order_by(publications.published_at.desc()).first())
     if pub is None:
         return None  # not published -> never rendered publicly
-    brand = BrandConfig()
-    url = canonical_url(brand.site_url, story.slug)
+    brand_cfg = BrandConfig()
+    url = canonical_url(brand_cfg.site_url, story.slug)
     jsonld = build_jsonld(
-        site_name=brand.name,
+        site_name=brand_cfg.name,
         title=story.title or story.slug,
         summary=story.summary,
         url=url,
         published_at=pub.published_at,
     )
+    sections = _article_sections(session, story)
+    # Insert ad-slot markers into the body sections.
+    try:
+        active_slots = load_active_slots(session)
+        sections = insert_ad_slots(sections, active_slots=active_slots)
+    except Exception:  # noqa: BLE001 — ad-slot failure must never block rendering
+        pass
+    # Related stories: up to 5 stories with the same topic, excluding this one.
+    related = []
+    if story.topic:
+        related_rows = (
+            session.query(stories)
+            .filter(stories.topic == story.topic, stories.story_id != str(story.story_id))
+            .order_by(stories.created_at.desc())
+            .limit(5)
+            .all()
+        )
+        related = [{"slug": r.slug, "title": r.title or r.slug} for r in related_rows if r.slug]
+    analytics_id = os.getenv("NEWSFORGE_ANALYTICS_ID", "")
     return {
         "slug": story.slug,
         "title": story.title or story.slug,
         "summary": story.summary,
         "published_at": pub.published_at,
-        "sections": _article_sections(session, story),
+        "sections": sections,
         "canonical_url": url,
-        "og_tags": open_graph_tags(site_name=brand.name, title=story.title or story.slug,
+        "og_tags": open_graph_tags(site_name=brand_cfg.name, title=story.title or story.slug,
                                     summary=story.summary, url=url),
         "twitter_tags": twitter_card_tags(title=story.title or story.slug, summary=story.summary),
         "jsonld_script": render_jsonld_script(jsonld),
+        "related_stories": related,
+        "analytics_id": analytics_id,
     }
 
 
@@ -166,11 +188,18 @@ def create_app() -> FastAPI:
         # (config -> connect PostgreSQL -> migrate -> migration gate -> ready);
         # development/test/staging keep the fast in-place migration path.
         from newsforge.config import DatabaseConfig
+        from newsforge.ads import register_default_slots
 
         if DatabaseConfig().is_production:
             init_production_db()
         else:
             init_db()
+        # Register default ad-slot positions (idempotent).
+        try:
+            with get_session() as s:
+                register_default_slots(s)
+        except Exception:  # noqa: BLE001 — ad registration must never block startup
+            pass
         info = get_build_info()
         log_event(logger, "app_startup",
                   version=info["version"],

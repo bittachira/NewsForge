@@ -4,18 +4,42 @@
 {% for prop, content in og_tags %}<meta property="{{ prop }}" content="{{ content }}">{% endfor %}
 {% for name, content in twitter_tags %}<meta name="{{ name }}" content="{{ content }}">{% endfor %}
 <script type="application/ld+json">{{ jsonld_script|safe }}</script>
+{% if analytics_id %}
+<script async src="https://www.googletagmanager.com/gtag/js?id={{ analytics_id }}"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+  gtag('config', '{{ analytics_id }}');
+</script>
+{% endif %}
 {% endblock %}
 {% block title %}{{ title }} — {{ brand }}{% endblock %}
 {% block content %}
 <article>
   <h1>{{ title }}</h1>
   {% if summary %}<p class="summary">{{ summary }}</p>{% endif %}
+  {% if published_at %}<time class="published" datetime="{{ published_at }}">{{ published_at }}</time>{% endif %}
   {% for s in sections %}
-    {% if s.type == "fact" or s.type == "bullet" or s.type == "event" or s.type == "qa" %}
+    {% if s.type == "ad_slot" %}
+      {{ s.text|safe }}
+    {% elif s.type == "source_attribution" %}
+      <p class="source-attribution"><small>{{ s.text }}</small></p>
+    {% elif s.type == "fact" or s.type == "bullet" or s.type == "event" or s.type == "qa" %}
       <p class="fact">{{ s.text }}</p>
     {% else %}
       <p>{{ s.text }}</p>
     {% endif %}
   {% endfor %}
+  {% if related_stories %}
+  <section class="related-stories">
+    <h2>Related Stories</h2>
+    <ul>
+    {% for r in related_stories %}
+      <li><a href="/articles/{{ r.slug }}">{{ r.title }}</a></li>
+    {% endfor %}
+    </ul>
+  </section>
+  {% endif %}
 </article>
 {% endblock %}

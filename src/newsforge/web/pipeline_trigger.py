@@ -69,9 +69,16 @@ def validate_payload(payload) -> str | None:
     return raw.strip()
 
 
-def build_production_router() -> AiRouter:
-    """Build the provider router from env (MOCK is forbidden in production)."""
-    return AiRouter(config=AiConfig())
+def build_production_router() -> AiRouter | None:
+    """Build the provider router from env.
+
+    Returns ``None`` when ``NEWSFORGE_AI_ENABLED=false`` — the pipeline will
+    use the DeterministicGenerator instead.  Raises on invalid production config
+    when AI is enabled but misconfigured."""
+    cfg = AiConfig()
+    if not cfg.ai_enabled:
+        return None
+    return AiRouter(config=cfg)
 
 
 def _resolve_source(source_id: str) -> dict:
@@ -125,8 +132,13 @@ def run_pipeline_http(source_id: str | None) -> JSONResponse:
             source = _resolve_source(source_id)
 
         router = build_production_router()
-        route = router.route("generate")
-        ai = {"provider": route.provider, "model": route.model, "mock": route.mock}
+        if router is not None:
+            route = router.route("generate")
+            ai = {"provider": route.provider, "model": route.model, "mock": route.mock,
+                  "enabled": True}
+        else:
+            ai = {"provider": "deterministic", "model": "deterministic-template",
+                  "mock": False, "enabled": False}
         log_event(
             logger, "pipeline_trigger_start", request_id=rid, source_id=source_id,
             ai_provider=ai["provider"], ai_model=ai["model"], ai_mock=ai["mock"],
