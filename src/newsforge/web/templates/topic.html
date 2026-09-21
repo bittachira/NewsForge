@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}{{ topic }} — {{ brand }}{% endblock %}
+{% block content %}
+<h1>Topic: {{ topic }}</h1>
+{% if entries %}
+<ul class="article-list">
+  {% for e in entries %}
+  <li><a href="/articles/{{ e.slug }}">{{ e.title }}</a></li>
+  {% endfor %}
+</ul>
+{% else %}
+<p>No published articles for this topic yet.</p>
+{% endif %}
+{% endblock %}

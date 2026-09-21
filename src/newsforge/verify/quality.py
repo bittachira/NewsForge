@@ -8,6 +8,7 @@ detect -- and therefore block auto-publishing of -- content that fails any hard 
 - Contradictions    -- conflicting evidence is never hidden.
 - Risk              -- RED content must not auto-publish (enforced here too, redundantly).
 - Editorial safety  -- allegations / unverified claims route to human review.
+- Content quality   -- word count, empty body, source attribution (centralized in QualityConfig).
 
 Freshness is reported and lowers the composite score but does NOT by itself block publishing: a
 stale fact is not necessarily wrong, so it is surfaced for the Trust Engine rather than hard-blocked
@@ -17,6 +18,8 @@ high trust score does NOT rescue a failed gate; the two engines are independent 
 decides pass/fail.
 """
 from __future__ import annotations
+
+from typing import Any
 
 import re
 
@@ -55,7 +58,8 @@ def _is_supported(bundle) -> bool:
 
 # Reason codes that HARD-BLOCK auto-publishing (force passed=False).
 HARD_FAIL_REASONS = {"unsupported_claim", "fabricated_source", "contradiction_detected",
-                     "high_risk", "requires_human_review"}
+                     "high_risk", "requires_human_review", "insufficient_content",
+                     "missing_source_attribution"}
 
 # Composite-score weights for the six quality dimensions (sum to 1.0).
 _WEIGHTS = {
@@ -132,6 +136,62 @@ def evaluate_quality(
         bundles, checks, hard_failures,
         policy_version=policy_version, info_type=info_type, reference_time=reference_time,
     )
+
+
+def evaluate_editorial_quality(
+    *,
+    sections: list[dict],
+    source_attribution_required: bool = True,
+) -> tuple[bool, dict]:
+    """Editorial quality gate for generated article content.
+
+    Uses QualityConfig thresholds. Returns (passed, reasons).
+    Pure and deterministic -- no LLM, no network, no clock reads.
+
+    Word count counts only editorial content sections (intro, fact, bullet,
+    event, qa, note) -- NOT boilerplate (footer, source_attribution, ad_slot)."""
+    from newsforge.config import QualityConfig
+
+    cfg = QualityConfig()
+    reasons: dict[str, Any] = {}
+    failures: list[str] = []
+
+    # Count words across editorial content sections only.
+    all_text = " ".join(
+        s.get("text", "") for s in sections
+        if s.get("type") in ("intro", "fact", "bullet", "event", "qa", "note")
+    )
+    word_count = len(all_text.split())
+
+    # Word count checks.
+    if cfg.min_word_count > 0 and word_count < cfg.min_word_count:
+        failures.append("below_min_word_count")
+        reasons["word_count"] = word_count
+        reasons["min_required"] = cfg.min_word_count
+    elif cfg.max_word_count > 0 and word_count > cfg.max_word_count:
+        failures.append("above_max_word_count")
+        reasons["word_count"] = word_count
+        reasons["max_allowed"] = cfg.max_word_count
+    else:
+        reasons["word_count"] = word_count
+
+    # Empty body: only intro/footer/note sections, no facts.
+    fact_sections = [s for s in sections if s.get("type") in ("fact", "bullet", "event", "qa")]
+    if not fact_sections:
+        failures.append("empty_body_no_facts")
+    reasons["fact_section_count"] = len(fact_sections)
+
+    # Source attribution required.
+    if source_attribution_required and cfg.require_source_attribution:
+        attribution_sections = [s for s in sections if s.get("type") == "source_attribution"]
+        if not attribution_sections:
+            failures.append("missing_source_attribution")
+        reasons["attribution_count"] = len(attribution_sections)
+
+    passed = len(failures) == 0
+    reasons["passed"] = passed
+    reasons["failures"] = failures
+    return passed, reasons
 
 
 def _risk_for_bundle(bundle):

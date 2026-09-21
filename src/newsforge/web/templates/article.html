@@ -1,5 +1,7 @@
 {% extends "base.html" %}
 {% block head %}
+<meta name="description" content="{{ summary or '' }}">
+<meta name="robots" content="index, follow">
 <link rel="canonical" href="{{ canonical_url }}">
 {% for prop, content in og_tags %}<meta property="{{ prop }}" content="{{ content }}">{% endfor %}
 {% for name, content in twitter_tags %}<meta name="{{ name }}" content="{{ content }}">{% endfor %}
@@ -14,7 +16,7 @@
 </script>
 {% endif %}
 {% endblock %}
-{% block title %}{{ title }} — {{ brand }}{% endblock %}
+{% block title %}{{ title }} -- {{ brand }}{% endblock %}
 {% block content %}
 <article>
   <h1>{{ title }}</h1>

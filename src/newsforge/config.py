@@ -438,6 +438,57 @@ class LanguagesConfig:
     default_language: str = "es"
 
 
+@dataclass(frozen=True)
+class AdConfig:
+    """Ad provider configuration. Per-slot ad unit IDs allow provider switching
+    without modifying article.html. The provider resolves position -> ad unit."""
+
+    provider: str = os.getenv("NEWSFORGE_AD_PROVIDER", "none")
+
+    # Google AdSense
+    adsense_client_id: str = os.getenv("NEWSFORGE_ADSENSE_CLIENT_ID", "")
+    adsense_slot_ids: dict[str, str] = field(default_factory=lambda: {
+        k: os.getenv(v, "")
+        for k, v in {
+            "HEADER": "NEWSFORGE_ADSENSE_SLOT_HEADER",
+            "AFTER_INTRO": "NEWSFORGE_ADSENSE_SLOT_AFTER_INTRO",
+            "MID_ARTICLE": "NEWSFORGE_ADSENSE_SLOT_MID_ARTICLE",
+            "BEFORE_RELATED": "NEWSFORGE_ADSENSE_SLOT_BEFORE_RELATED",
+            "FOOTER": "NEWSFORGE_ADSENSE_SLOT_FOOTER",
+        }.items()
+    })
+
+
+@dataclass(frozen=True)
+class SchedulerConfig:
+    """Pipeline scheduler configuration.
+
+    CURRENT_MODEL: one application process -> one scheduler.
+    NOT MULTI-INSTANCE SAFE BY ITSELF. Execution is protected by the
+    process-wide lock in pipeline_trigger.py and by the 6-layer idempotency
+    model. For multi-instance deployments, use an external scheduler
+    (Render Cron, cron job, dedicated worker) that calls
+    POST /admin/pipeline/run instead of enabling this in-process scheduler."""
+
+    enabled: bool = _env_bool("NEWSFORGE_SCHEDULER_ENABLED", False)
+    interval_minutes: int = int(os.getenv("NEWSFORGE_SCHEDULER_INTERVAL_MINUTES", "30") or "30")
+    # Optional cron expression (overrides interval when set). Format: "MIN HOUR DOM MON DOW"
+    cron_expression: str = os.getenv("NEWSFORGE_SCHEDULER_CRON", "")
+
+
+@dataclass(frozen=True)
+class QualityConfig:
+    """Centralized editorial quality thresholds used by generate validation,
+    verify quality gate, and pre-publish checks. All three gates read from
+    the same config to avoid contradictory logic."""
+
+    # Set to 0 to disable minimum word count check. Default: 1 (non-empty content required).
+    # Deployments can increase this via NEWSFORGE_MIN_WORD_COUNT env var.
+    min_word_count: int = int(os.getenv("NEWSFORGE_MIN_WORD_COUNT", "1") or "1")
+    max_word_count: int = int(os.getenv("NEWSFORGE_MAX_WORD_COUNT", "5000") or "5000")
+    require_source_attribution: bool = _env_bool("NEWSFORGE_REQUIRE_SOURCE_ATTRIBUTION", True)
+
+
 def get_config(*, sections: tuple[str, ...] | None = None) -> dict[str, object]:
     """Return the requested config objects as a plain dict (for templates/tests)."""
     cfgs = {
@@ -449,6 +500,9 @@ def get_config(*, sections: tuple[str, ...] | None = None) -> dict[str, object]:
         "seo": SeoConfig(),
         "server": ServerConfig(),
         "languages": LanguagesConfig(),
+        "ad": AdConfig(),
+        "scheduler": SchedulerConfig(),
+        "quality": QualityConfig(),
     }
     if sections is None:
         return cfgs

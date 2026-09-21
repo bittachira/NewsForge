@@ -40,8 +40,8 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.templating import Jinja2Templates
 
 from newsforge.analytics import content_roi_query, total_ai_cost
-from newsforge.ads import insert_ad_slots, load_active_slots
-from newsforge.config import BrandConfig, assert_production_safe
+from newsforge.ads import get_provider, insert_ad_slots, load_active_slots
+from newsforge.config import BrandConfig, LanguagesConfig, SchedulerConfig, SeoConfig, assert_production_safe
 from newsforge.core.build_info import get_build_info
 from newsforge.core.logger import get_logger, log_event
 from newsforge.core.metrics import metrics
@@ -97,6 +97,8 @@ def _published_entries(session) -> list[dict]:
             "title": story.title or story.slug,
             "summary": story.summary,
             "published_at": pub.published_at,
+            "lastmod": pub.published_at,
+            "topic": story.topic,
         }
         cur = best.get(entry["story_pk"])
         if cur is None:
@@ -145,11 +147,12 @@ def _article_view(session, slug: str) -> Optional[dict]:
         published_at=pub.published_at,
     )
     sections = _article_sections(session, story)
-    # Insert ad-slot markers into the body sections.
+    # Insert ad-slot markers into the body sections using the configured provider.
     try:
         active_slots = load_active_slots(session)
-        sections = insert_ad_slots(sections, active_slots=active_slots)
-    except Exception:  # noqa: BLE001 — ad-slot failure must never block rendering
+        ad_provider = get_provider()
+        sections = insert_ad_slots(sections, active_slots=active_slots, provider=ad_provider)
+    except Exception:  # noqa: BLE001 -- ad-slot failure must never block rendering
         pass
     # Related stories: up to 5 stories with the same topic, excluding this one.
     related = []
@@ -163,6 +166,7 @@ def _article_view(session, slug: str) -> Optional[dict]:
         )
         related = [{"slug": r.slug, "title": r.title or r.slug} for r in related_rows if r.slug]
     analytics_id = os.getenv("NEWSFORGE_ANALYTICS_ID", "")
+    lang = LanguagesConfig().default_language
     return {
         "slug": story.slug,
         "title": story.title or story.slug,
@@ -170,12 +174,16 @@ def _article_view(session, slug: str) -> Optional[dict]:
         "published_at": pub.published_at,
         "sections": sections,
         "canonical_url": url,
-        "og_tags": open_graph_tags(site_name=brand_cfg.name, title=story.title or story.slug,
-                                    summary=story.summary, url=url),
+        "og_tags": open_graph_tags(
+            site_name=brand_cfg.name, title=story.title or story.slug,
+            summary=story.summary, url=url, published_at=pub.published_at,
+        ),
         "twitter_tags": twitter_card_tags(title=story.title or story.slug, summary=story.summary),
         "jsonld_script": render_jsonld_script(jsonld),
         "related_stories": related,
         "analytics_id": analytics_id,
+        "lang": lang,
+        "topic": story.topic,
     }
 
 
@@ -198,8 +206,20 @@ def create_app() -> FastAPI:
         try:
             with get_session() as s:
                 register_default_slots(s)
-        except Exception:  # noqa: BLE001 — ad registration must never block startup
+        except Exception:  # noqa: BLE001 -- ad registration must never block startup
             pass
+        # Start the pipeline scheduler if enabled.
+        # SINGLE_PROCESS scope: this scheduler runs only in this process.
+        # NOT multi-instance safe by itself. Execution is protected by the
+        # process-wide lock in pipeline_trigger.py and 6-layer idempotency.
+        scheduler = None
+        sched_cfg = SchedulerConfig()
+        if sched_cfg.enabled:
+            try:
+                from newsforge.pipeline.scheduler import start_scheduler
+                scheduler = start_scheduler(sched_cfg)
+            except Exception:  # noqa: BLE001 -- scheduler must never block startup
+                logger.warning("scheduler failed to start")
         info = get_build_info()
         log_event(logger, "app_startup",
                   version=info["version"],
@@ -208,6 +228,12 @@ def create_app() -> FastAPI:
                   python_version=info["python_version"],
                   schema_version=str(info["schema_version"]))
         yield
+        # Shutdown scheduler if running.
+        if scheduler is not None:
+            try:
+                scheduler.shutdown(wait=False)
+            except Exception:  # noqa: BLE001
+                pass
 
     app = FastAPI(title="NewsForge Web", lifespan=_lifespan,
                   docs_url=None, redoc_url=None, openapi_url=None)
@@ -255,15 +281,75 @@ def create_app() -> FastAPI:
     def sitemap_xml():
         with get_session() as s:
             entries = _published_entries(s)
-        xml_text = render_sitemap_xml(entries, brand.site_url)
+            # Add topic page entries.
+            topics = set()
+            for e in entries:
+                t = e.get("topic")
+                if t:
+                    topics.add(t)
+            topic_entries = [{"slug": f"topics/{t}", "lastmod": None} for t in sorted(topics)]
+        xml_text = render_sitemap_xml(entries + topic_entries, brand.site_url)
         return Response(content=xml_text, media_type="application/xml")
 
     @app.get("/feed.xml", response_class=Response)
     def rss_feed():
         with get_session() as s:
             entries = _published_entries(s)
-        xml_text = render_rss_xml(site_name=brand.name, site_url=brand.site_url, entries=entries)
+        lang = LanguagesConfig().default_language
+        xml_text = render_rss_xml(site_name=brand.name, site_url=brand.site_url, entries=entries, language=lang)
         return Response(content=xml_text, media_type="application/xml")
+
+    @app.get("/topics/{topic}", response_class=HTMLResponse)
+    def topic_page(request: Request, topic: str):
+        """Topic page: lists all published articles matching a topic."""
+        with get_session() as s:
+            pubs = s.query(publications).filter_by(
+                status=PublicationStatus.COMPLETED.value).all()
+            entries = []
+            seen: set[str] = set()
+            for pub in pubs:
+                story = s.query(stories).filter_by(story_id=str(pub.story_id)).first()
+                if story is None or not story.slug:
+                    continue
+                if story.topic != topic:
+                    continue
+                if story.story_id in seen:
+                    continue
+                seen.add(story.story_id)
+                entries.append({
+                    "slug": story.slug,
+                    "title": story.title or story.slug,
+                    "summary": story.summary,
+                    "published_at": pub.published_at,
+                })
+            entries.sort(key=lambda e: str(e.get("published_at") or ""), reverse=True)
+        return templates.TemplateResponse(
+            request, "topic.html",
+            {"brand": brand.name, "topic": topic, "entries": entries})
+
+    @app.get("/robots.txt", response_class=Response)
+    def robots_txt():
+        robots = SeoConfig().robots_txt
+        return Response(content=robots, media_type="text/plain")
+
+    @app.get("/admin/scheduler/status")
+    def scheduler_status(request: Request):
+        """Scheduler status (admin-gated). Returns current scheduler state."""
+        if not _internal_allowed(request):
+            raise HTTPException(status_code=403, detail="forbidden")
+        sched_cfg = SchedulerConfig()
+        status = {
+            "enabled": sched_cfg.enabled,
+            "interval_minutes": sched_cfg.interval_minutes,
+            "cron_expression": sched_cfg.cron_expression or None,
+            "scope": "SINGLE_PROCESS",
+        }
+        try:
+            from newsforge.pipeline.scheduler import get_scheduler_status
+            status.update(get_scheduler_status())
+        except Exception:  # noqa: BLE001
+            status["error"] = "scheduler module not available"
+        return JSONResponse(content=status)
 
     @app.get("/health", response_model=dict)
     def health_check():

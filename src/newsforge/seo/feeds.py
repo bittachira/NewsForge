@@ -42,7 +42,7 @@ def render_sitemap_xml(entries: Iterable[dict], site_url: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-def render_rss_xml(*, site_name: str, site_url: str, entries: Iterable[dict]) -> str:
+def render_rss_xml(*, site_name: str, site_url: str, entries: Iterable[dict], language: str = "en") -> str:
     """Render a valid RSS 2.0 feed of published articles.
 
     Each entry needs ``slug`` and ``title``; optional ``summary``/``published_at``."""
@@ -54,7 +54,7 @@ def render_rss_xml(*, site_name: str, site_url: str, entries: Iterable[dict]) ->
         f"  <title>{escape(site_name)}</title>",
         f"  <link>{escape(base + '/articles')}</link>",
         f"  <description>{escape('Published, verified articles')}</description>",
-        "  <language>en</language>",
+        f"  <language>{escape(language)}</language>",
     ]
     for e in entries:
         link = f"{base}/articles/{e['slug']}"

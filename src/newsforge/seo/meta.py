@@ -49,7 +49,8 @@ def render_jsonld_script(jsonld: dict) -> str:
     return raw.replace("</", "\\u003c/").replace("<!--", "\\u003c!--")
 
 
-def open_graph_tags(*, site_name: str, title: str, summary: Optional[str], url: str) -> list[tuple[str, str]]:
+def open_graph_tags(*, site_name: str, title: str, summary: Optional[str], url: str,
+                     published_at: Optional[str] = None) -> list[tuple[str, str]]:
     """OpenGraph meta tags (property, content) for one article page."""
     tags = [
         ("og:type", "article"),
@@ -59,6 +60,8 @@ def open_graph_tags(*, site_name: str, title: str, summary: Optional[str], url: 
     ]
     if summary:
         tags.append(("og:description", summary))
+    if published_at:
+        tags.append(("article:published_time", published_at))
     return tags
 
 

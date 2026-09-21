@@ -297,6 +297,27 @@ def publish_story(session, *, story_id: str, destinations=None) -> dict:
     if not keys:
         return _blocked_result(story_id, reason="no destinations registered")
 
+    # Editorial quality gate: word count, empty body, source attribution.
+    # This is a soft gate: it logs warnings but does NOT block publication.
+    # The hard editorial quality gate is in the pipeline's DECIDE phase (verify/persist.py).
+    from newsforge.verify.quality import evaluate_editorial_quality
+    from newsforge.db.models import generated_artifacts as ga_model, from_jsonable
+    try:
+        artifact = (session.query(ga_model)
+                    .filter_by(story_id=str(story_id))
+                    .order_by(ga_model.created_at.desc()).first())
+        if artifact is not None:
+            body = from_jsonable(artifact.body_json) or {}
+            sections = body.get("sections") or []
+            ed_passed, ed_reasons = evaluate_editorial_quality(sections=sections)
+            if not ed_passed:
+                log_event(logger, "editorial_quality_warning",
+                          story_id=str(story_id),
+                          failures=ed_reasons.get("failures", []),
+                          word_count=ed_reasons.get("word_count", 0))
+    except Exception:  # noqa: BLE001 -- editorial quality check must never block publishing on error
+        pass
+
     publications: dict[str, publications] = {}
     for dk in keys:
         pub = _load_or_create_publication(session, story_id, dk, decision_row)

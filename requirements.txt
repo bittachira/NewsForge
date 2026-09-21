@@ -49,6 +49,7 @@ starlette==1.6.0
 typing-inspection==0.4.4
 typing-extensions==4.16.0
 urllib3==2.7.0
+APScheduler==3.11.0
 uvicorn[standard]==0.52.4
 watchfiles==1.2.0
 websockets==17.1
